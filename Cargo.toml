@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/documents",
+    "crates/embeddings",
+    "crates/search",
+    "crates/llm",
+    "crates/connectors",
+    "services/ingestion-worker",
+    "services/sync-worker",
+]

@@ -9,4 +9,5 @@ members = [
     "crates/connectors",
     "services/ingestion-worker",
     "services/sync-worker",
+    "services/search-worker",
 ]

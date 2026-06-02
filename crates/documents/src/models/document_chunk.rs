@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use common::types::{DocumentId, TenantId, SourceType};
+use common::types::{DocumentId, TenantId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChunk {

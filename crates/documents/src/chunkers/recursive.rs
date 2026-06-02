@@ -10,7 +10,7 @@ pub struct RecursiveTextChunker {
 }
 
 impl RecursiveTextChunker {
-    pub fn new(chunk_size: usize, chunk_overlap: usize) -> Self {
+    pub fn new(chunk_size: usize, _chunk_overlap: usize) -> Self {
         Self {
             chunker: MarkdownSplitter::<_>::new(ChunkConfig::new(chunk_size)),
         }
@@ -29,7 +29,7 @@ impl Chunker for RecursiveTextChunker {
             .map(|(i, (start_offset, chunk))| {
                 let end_offset = start_offset + chunk.len();
                 DocumentChunk {
-                    id: format!("{}", i),
+                    id: uuid::Uuid::new_v4().to_string(),
                     document_id: document.id.clone(),
                     tenant_id: document.tenant_id.clone(),
                     content: document.content[start_offset..end_offset].to_string(),

@@ -4,4 +4,4 @@ pub mod traits;
 
 pub use models::{Embedding, EmbeddingInput};
 pub use traits::EmbeddingProvider;
-pub use providers::{OpenAiProvider, GeminiProvider};
+pub use providers::{OpenAiProvider, GeminiProvider, NvidiaProvider};

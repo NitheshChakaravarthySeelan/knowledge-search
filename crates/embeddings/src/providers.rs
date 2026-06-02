@@ -23,7 +23,6 @@ impl OpenAiProvider {
 impl EmbeddingProvider for OpenAiProvider {
     async fn embed(&self, input: &EmbeddingInput) -> Result<Embedding> {
         if self.api_key.is_empty() || self.api_key == "mock" {
-            // Local high-fidelity mock vector generation
             return generate_mock_embedding(&input.text, 1536);
         }
 
@@ -145,6 +144,82 @@ impl EmbeddingProvider for GeminiProvider {
         Ok(Embedding {
             vector,
             dimensions: 768,
+        })
+    }
+
+    async fn embed_batch(&self, inputs: &[EmbeddingInput]) -> Result<Vec<Embedding>> {
+        let mut results = Vec::new();
+        for input in inputs {
+            results.push(self.embed(input).await?);
+        }
+        Ok(results)
+    }
+}
+
+pub struct NvidiaProvider {
+    pub api_key: String,
+    client: Client,
+}
+
+impl NvidiaProvider {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            client: Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for NvidiaProvider {
+    async fn embed(&self, input: &EmbeddingInput) -> Result<Embedding> {
+        if self.api_key.is_empty() || self.api_key == "mock" {
+            return generate_mock_embedding(&input.text, 1024);
+        }
+
+        let response = self.client
+            .post("https://integrate.api.nvidia.com/v1/embeddings")
+            .bearer_auth(&self.api_key)
+            .json(&json!({
+                "input": input.text,
+                "model": "nvidia/nv-embedqa-e5-v5",
+                "input_type": "query",
+                "encoding_format": "float"
+            }))
+            .send()
+            .await
+            .map_err(|e| AppError::ExternalService {
+                service: "NVIDIA".to_string(),
+                message: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::ExternalService {
+                service: "NVIDIA".to_string(),
+                message: format!("Status: {}, Body: {}", status, body),
+            });
+        }
+
+        let json_body: serde_json::Value = response.json().await.map_err(|e| AppError::ExternalService {
+            service: "NVIDIA".to_string(),
+            message: format!("Failed to parse response body as JSON: {}", e),
+        })?;
+
+        let vector = json_body["data"][0]["embedding"]
+            .as_array()
+            .ok_or_else(|| AppError::ExternalService {
+                service: "NVIDIA".to_string(),
+                message: "Missing embedding vector in NVIDIA response".to_string(),
+            })?
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+
+        Ok(Embedding {
+            vector,
+            dimensions: 1024,
         })
     }
 

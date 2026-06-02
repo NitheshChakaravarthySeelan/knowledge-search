@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use common::errors::Result;
+use common::errors::{AppError, Result};
 use common::types::TenantId;
 use embeddings::traits::EmbeddingProvider;
 use embeddings::models::EmbeddingInput;
+use connectors::QdrantClient;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -21,15 +23,21 @@ pub trait Retriever: Send + Sync {
 }
 
 pub struct VectorRetriever {
-    embedding_provider: std::sync::Arc<dyn EmbeddingProvider>,
-    qdrant_url: String,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+    qdrant_client: Arc<QdrantClient>,
+    collection_name: String,
 }
 
 impl VectorRetriever {
-    pub fn new(embedding_provider: std::sync::Arc<dyn EmbeddingProvider>, qdrant_url: String) -> Self {
+    pub fn new(
+        embedding_provider: Arc<dyn EmbeddingProvider>,
+        qdrant_client: Arc<QdrantClient>,
+        collection_name: String,
+    ) -> Self {
         Self {
             embedding_provider,
-            qdrant_url,
+            qdrant_client,
+            collection_name,
         }
     }
 }
@@ -42,34 +50,57 @@ impl Retriever for VectorRetriever {
             text: query.to_string(),
             user_id: None,
         };
-        let _embedding = self.embedding_provider.embed(&input).await?;
+        let embedding = self.embedding_provider.embed(&input).await?;
         
         tracing::debug!(
             tenant = tenant_id.0,
             query = query,
-            qdrant_endpoint = self.qdrant_url,
+            collection = self.collection_name,
             "Executing vector search query..."
         );
 
-        // 2. Query Qdrant (mock database hits for compilation stability)
-        let mut mock_results = vec![
-            SearchResult {
-                chunk_id: "doc1_chunk_0".to_string(),
-                document_id: "doc1".to_string(),
-                content: format!("This is a high-fidelity matching paragraph about: {}.", query),
-                score: 0.89,
-                metadata: serde_json::json!({ "source": "Notion", "author": "Nitish" }),
-            },
-            SearchResult {
-                chunk_id: "doc2_chunk_1".to_string(),
-                document_id: "doc2".to_string(),
-                content: "Knowledge management infrastructures are critical for serious AI operations.".to_string(),
-                score: 0.74,
-                metadata: serde_json::json!({ "source": "FileUpload", "author": "System" }),
-            }
-        ];
+        // 2. Query Qdrant
+        let results = self.qdrant_client
+            .search(
+                &self.collection_name,
+                embedding.vector,
+                limit as u64,
+                Some(&tenant_id.0),
+            )
+            .await
+            .map_err(|e| AppError::ExternalService {
+                service: "Qdrant".to_string(),
+                message: e.to_string(),
+            })?;
 
-        mock_results.truncate(limit);
-        Ok(mock_results)
+        // 3. Map Qdrant points to SearchResult
+        let search_results = results.into_iter().map(|point| {
+            let metadata = serde_json::json!(point.payload);
+            
+            let chunk_id = match point.id {
+                Some(id) => match id.point_id_options {
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => n.to_string(),
+                    Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(s)) => s,
+                    None => "unknown".to_string(),
+                },
+                None => "unknown".to_string(),
+            };
+
+            SearchResult {
+                chunk_id,
+                document_id: metadata.get("document_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                content: metadata.get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                score: point.score,
+                metadata,
+            }
+        }).collect();
+
+        Ok(search_results)
     }
 }

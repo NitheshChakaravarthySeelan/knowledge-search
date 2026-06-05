@@ -1,4 +1,5 @@
 pub mod providers;
+pub mod rag;
 
 use async_trait::async_trait;
 use common::errors::Result;
@@ -9,4 +10,5 @@ pub trait LlmProvider: Send + Sync {
     async fn generate(&self, prompt: &str, system_instruction: Option<&str>) -> Result<String>;
 }
 
-pub use providers::{OpenAiLlm, GeminiLlm};
+pub use providers::{OpenAiLlm, GeminiLlm, NvidiaLlm};
+pub use rag::RagService;

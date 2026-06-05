@@ -9,6 +9,7 @@ pub struct Model {
     pub tenant_id: String,
     pub title: String,
     pub content: String,
+    pub file_extension: Option<String>,
     pub status: String,
     pub created_at: DateTimeWithTimeZone,
 }

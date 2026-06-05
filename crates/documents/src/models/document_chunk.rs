@@ -7,6 +7,7 @@ pub struct DocumentChunk {
     pub document_id: DocumentId,
     pub tenant_id: TenantId,
     pub content: String,
+    pub parent_content: Option<String>,
     pub index: usize,
     pub start_offset: usize,
     pub end_offset: usize,

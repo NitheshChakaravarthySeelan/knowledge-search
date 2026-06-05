@@ -7,15 +7,15 @@ use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrai
 use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::{DocumentId, TenantId};
-use common::migrations::Migrator;
-use common::entities::document_job;
-use sea_orm_migration::prelude::*;
-use sea_orm_migration::migrator::MigratorTrait;
+use migration::Migrator;
+use entities::document_job;
+use sea_orm_migration::MigratorTrait;
 
 use connectors::QdrantClient;
 use documents::loaders::{Loader, FileLoader};
-use documents::chunkers::{Chunker, RecursiveTextChunker};
-use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, EmbeddingInput};
+use documents::chunkers::{Chunker, HierarchicalChunker};
+use documents::ParserRegistry;
+use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, EmbeddingInput, LocalHashingSparseEncoder, SparseEmbeddingProvider};
 
 #[tokio::main]
 async fn main() {
@@ -67,7 +67,9 @@ async fn main() {
 
     // 5. Initialize pipeline components
     let loader = FileLoader::new();
-    let chunker = RecursiveTextChunker::default();
+    let chunker = HierarchicalChunker::default();
+    let parser_registry = ParserRegistry::new();
+    let sparse_encoder = Arc::new(LocalHashingSparseEncoder::default());
 
     // 6. Initialize Qdrant Connector
     let qdrant_client = match QdrantClient::new(&config.qdrant_url) {
@@ -128,61 +130,60 @@ async fn main() {
             }
 
             // STAGE 1: Extract/Load
-            let pipeline_result = match loader.load(doc_id.clone(), tenant.clone(), job.content.as_bytes(), job.title.clone()) {
-                Ok(doc) => {
-                    info!(job_id = job.id.to_string(), "Stage 1/4 (Extraction) - SUCCESS");
+            let pipeline_result = (|| async {
+                // Determine raw bytes (handle base64 if it's a binary file)
+                let raw_bytes = if job.file_extension.as_deref() == Some("pdf") || job.file_extension.as_deref() == Some("docx") {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.decode(&job.content).map_err(|e| format!("Base64 decode failed: {:?}", e))?
+                } else {
+                    job.content.as_bytes().to_vec()
+                };
 
-                    // STAGE 2: Chunking
-                    match chunker.chunk(&doc) {
-                        Ok(chunks) => {
-                            info!(job_id = job.id.to_string(), count = chunks.len(), "Stage 2/4 (Chunking) - SUCCESS");
-
-                            // STAGE 3 & 4: Embedding and Storage
-                            let mut pipeline_success = true;
-                            for chunk in &chunks {
-                                let input = EmbeddingInput {
-                                    text: chunk.content.clone(),
-                                    user_id: None,
-                                };
-                                
-                                match embedding_provider.embed(&input).await {
-                                    Ok(vector) => {
-                                        // STAGE 4: Storage
-                                        if let Err(e) = qdrant_client.upsert_chunks(
-                                            collection_name,
-                                            &[chunk.clone()],
-                                            &[vector.vector],
-                                        ).await {
-                                            error!(job_id = job.id.to_string(), chunk_id = chunk.id, "Stage 4/4 (Storage) - FAILED: {:?}", e);
-                                            pipeline_success = false;
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!(job_id = job.id.to_string(), chunk_id = chunk.id, "Stage 3/4 (Embedding) - FAILED: {:?}", e);
-                                        pipeline_success = false;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if pipeline_success {
-                                Ok(())
-                            } else {
-                                Err("Pipeline failed during embedding or storage".to_string())
-                            }
-                        }
-                        Err(e) => {
-                            error!(job_id = job.id.to_string(), "Stage 2/4 (Chunking) - FAILED: {:?}", e);
-                            Err(format!("Chunking failed: {:?}", e))
+                // Use Parser Registry if an extension is provided, otherwise fallback to plain text
+                let extracted_content = if let Some(ext) = &job.file_extension {
+                    match parser_registry.get_parser(ext) {
+                        Some(parser) => parser.parse(&raw_bytes).map_err(|e| format!("Parser failed: {:?}", e))?,
+                        None => {
+                            warn!(extension = ext, "No specialized parser found, attempting plain text fallback.");
+                            String::from_utf8(raw_bytes).map_err(|e| format!("UTF8 conversion failed: {:?}", e))?
                         }
                     }
+                } else {
+                    String::from_utf8(raw_bytes).map_err(|e| format!("UTF8 conversion failed: {:?}", e))?
+                };
+
+                let doc = loader.load(doc_id.clone(), tenant.clone(), extracted_content.as_bytes(), job.title.clone())
+                    .map_err(|e| format!("Loader failed: {:?}", e))?;
+                
+                info!(job_id = job.id.to_string(), "Stage 1/4 (Extraction) - SUCCESS");
+
+                // STAGE 2: Chunking
+                let chunks = chunker.chunk(&doc).map_err(|e| format!("Chunking failed: {:?}", e))?;
+                info!(job_id = job.id.to_string(), count = chunks.len(), "Stage 2/4 (Chunking) - SUCCESS");
+
+                // STAGE 3 & 4: Embedding and Storage
+                for chunk in &chunks {
+                    let input = EmbeddingInput {
+                        text: chunk.content.clone(),
+                        user_id: None,
+                    };
+                    
+                    let dense_vector = embedding_provider.embed(&input).await
+                        .map_err(|e| format!("Dense embedding failed: {:?}", e))?;
+
+                    let sparse_vector = sparse_encoder.embed_sparse(&chunk.content).await
+                        .map_err(|e| format!("Sparse embedding failed: {:?}", e))?;
+
+                    qdrant_client.upsert_chunks_hybrid(
+                        collection_name,
+                        &[chunk.clone()],
+                        &[dense_vector.vector],
+                        &[(sparse_vector.indices, sparse_vector.values)],
+                    ).await.map_err(|e| format!("Storage failed: {:?}", e))?;
                 }
-                Err(e) => {
-                    error!(job_id = job.id.to_string(), "Stage 1/4 (Extraction) - FAILED: {:?}", e);
-                    Err(format!("Extraction failed: {:?}", e))
-                }
-            };
+
+                Ok::<(), String>(())
+            })().await;
 
             // Update final status
             let mut final_job: document_job::ActiveModel = job.clone().into();
@@ -192,7 +193,8 @@ async fn main() {
                     let _ = final_job.update(&db).await;
                     info!(job_id = job.id.to_string(), "Job completed successfully.");
                 }
-                Err(_) => {
+                Err(e) => {
+                    error!(job_id = job.id.to_string(), "Job failed: {}", e);
                     final_job.status = ActiveValue::set("failed".to_string());
                     let _ = final_job.update(&db).await;
                 }

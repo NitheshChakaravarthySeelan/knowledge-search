@@ -5,16 +5,18 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+base64 = "0.22.1"
 common = { version = "0.1.0", path = "../../crates/common" }
 connectors = { version = "0.1.0", path = "../../crates/connectors" }
 documents = { version = "0.1.0", path = "../../crates/documents" }
 dotenvy = "0.15.7"
 embeddings = { version = "0.1.0", path = "../../crates/embeddings" }
+entities = { version = "0.1.0", path = "../../crates/entities" }
+migration = { version = "0.1.0", path = "../../crates/migration" }
 sea-orm = { version = "1.1.20", features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
 sea-orm-migration = "1.1.20"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1.44"

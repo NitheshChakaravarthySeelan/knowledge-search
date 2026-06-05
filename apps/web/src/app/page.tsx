@@ -28,6 +28,10 @@ export default function Home() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchLatency, setSearchLatency] = useState<number | null>(null);
+  
+  // New State for Answer Engine
+  const [isAsking, setIsAsking] = useState(false);
+  const [aiAnswer, setAiAnswer] = useState<string | null>(null);
 
   // Ingestion Form State
   const [docTitle, setDocTitle] = useState('');
@@ -35,6 +39,9 @@ export default function Home() {
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestionStep, setIngestionStep] = useState<number>(0); // 0=None, 1=Loaded, 2=Chunked, 3=Embedded, 4=Stored
   const [ingestedId, setIngestedId] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [fileExtension, setFileExtension] = useState<string | null>(null);
+  const [base64Content, setBase64Content] = useState<string>('');
 
   // Connector Sync State
   const [connectors, setConnectors] = useState<Connector[]>([
@@ -71,6 +78,7 @@ export default function Home() {
     if (!searchQuery.trim()) return;
 
     setIsSearching(true);
+    setAiAnswer(null); // Clear previous AI answers
     const startTime = performance.now();
 
     try {
@@ -88,8 +96,7 @@ export default function Home() {
         throw new Error('Backend offline');
       }
     } catch (err) {
-      // High-Fidelity Local Simulation Fallback
-      console.warn("API Gateway is offline. Running local browser-side semantic search simulator.");
+      console.warn("API Gateway is offline. Search simulator fallback.");
       setTimeout(() => {
         const mockResults: SearchResult[] = [
           {
@@ -123,14 +130,49 @@ export default function Home() {
     }
   };
 
+  // Handler: Ask AI Engine
+  const handleAsk = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+
+    setIsAsking(true);
+    setSearchResults([]); // Hide chunks to focus on the answer
+    setAiAnswer(null);
+    
+    try {
+      const response = await fetch('http://localhost:8000/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: searchQuery })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setAiAnswer(data.answer);
+      } else {
+        setAiAnswer("Error: Failed to fetch answer from LLM.");
+      }
+    } catch (err) {
+      setAiAnswer("Error: Cannot connect to Answer Engine.");
+    } finally {
+      setIsAsking(false);
+    }
+  };
+
   // Handler: Document Ingestion Pipeline simulation
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!docTitle.trim() || !docContent.trim()) return;
+    
+    // Updated validation: title is required, and either content OR a file must be present
+    if (!docTitle.trim()) return;
+    if (!file && !docContent.trim()) return;
 
     setIsIngesting(true);
     setIngestionStep(1); // Stage 1: Loaded/Extracted
     setIngestedId(null);
+
+    // Determine what content to send
+    const finalContent = file ? base64Content : docContent;
 
     // Simulate stepping through stages with beautiful stepper intervals
     setTimeout(() => {
@@ -145,6 +187,9 @@ export default function Home() {
           setIsIngesting(false);
           setDocTitle('');
           setDocContent('');
+          setFile(null);
+          setFileExtension(null);
+          setBase64Content('');
         }, 800);
       }, 800);
     }, 800);
@@ -154,7 +199,11 @@ export default function Home() {
       await fetch('http://localhost:8000/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: docTitle, content: docContent })
+        body: JSON.stringify({ 
+          title: docTitle, 
+          content: finalContent,
+          fileExtension: fileExtension 
+        })
       });
     } catch (_) {}
   };
@@ -236,7 +285,16 @@ export default function Home() {
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
                 <button type="submit" className="search-btn" disabled={isSearching}>
-                  {isSearching ? 'Searching...' : 'Query'}
+                  {isSearching ? 'Searching...' : 'Search'}
+                </button>
+                <button 
+                  type="button" 
+                  className="search-btn" 
+                  style={{ backgroundColor: 'var(--color-secondary)' }}
+                  onClick={handleAsk}
+                  disabled={isAsking}
+                >
+                  {isAsking ? 'Asking...' : 'Ask AI'}
                 </button>
               </div>
               {searchLatency !== null && (
@@ -248,12 +306,18 @@ export default function Home() {
 
             {/* Results Output */}
             <div className="results-wrapper">
-              {searchResults.length === 0 ? (
+              {aiAnswer && (
+                <div className="glass-card" style={{ padding: '1rem', marginBottom: '1rem', border: '1px solid var(--color-secondary)' }}>
+                  <h3 style={{ margin: '0 0 0.5rem 0', color: 'var(--color-secondary)' }}>AI Answer</h3>
+                  <p style={{ whiteSpace: 'pre-wrap' }}>{aiAnswer}</p>
+                </div>
+              )}
+              {searchResults.length === 0 && !aiAnswer && !isSearching && !isAsking && (
                 <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
                   No semantic chunks match your query. Try another phrase.
                 </div>
-              ) : (
-                searchResults.map((result, idx) => (
+              )}
+              {searchResults.map((result, idx) => (
                   <div className="result-item" key={result.chunk_id || idx}>
                     <div className="result-header">
                       <div className="result-title">{result.metadata?.title || 'Document Section'}</div>
@@ -278,8 +342,7 @@ export default function Home() {
                       </a>
                     )}
                   </div>
-                ))
-              )}
+                ))}
             </div>
           </div>
 
@@ -296,9 +359,9 @@ export default function Home() {
             <form onSubmit={handleIngest} className="ingest-form">
               <div className="form-group">
                 <label className="form-label">Document Title</label>
-                <input 
-                  type="text" 
-                  className="form-input" 
+                <input
+                  type="text"
+                  className="form-input"
                   placeholder="e.g. Operating Guidelines v2"
                   value={docTitle}
                   onChange={(e) => setDocTitle(e.target.value)}
@@ -307,16 +370,48 @@ export default function Home() {
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Raw Text Content</label>
-                <textarea 
-                  className="form-input form-textarea" 
-                  placeholder="Paste text contents or files markdown representation here..."
-                  value={docContent}
-                  onChange={(e) => setDocContent(e.target.value)}
+                <label className="form-label">Upload File (PDF/DOCX)</label>
+                <input
+                  type="file"
+                  accept=".pdf,.docx"
+                  className="form-input"
+                  onChange={e => {
+                    const f = e.target.files?.[0];
+                    if (f) {
+                      setFile(f);
+                      const ext = f.name.split('.').pop()?.toLowerCase() ?? null;
+                      setFileExtension(ext);
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const result = reader.result;
+                        if (typeof result === 'string') {
+                          const base64 = result.split(',')[1];
+                          setBase64Content(base64);
+                        }
+                      };
+                      reader.readAsDataURL(f);
+                    } else {
+                      setFile(null);
+                      setFileExtension(null);
+                      setBase64Content('');
+                    }
+                  }}
                   disabled={isIngesting}
-                  required
-                ></textarea>
+                />
               </div>
+              {!file && (
+                <div className="form-group">
+                  <label className="form-label">Raw Text Content</label>
+                  <textarea
+                    className="form-input form-textarea"
+                    placeholder="Paste text contents here..."
+                    value={docContent}
+                    onChange={(e) => setDocContent(e.target.value)}
+                    disabled={isIngesting}
+                    required
+                  ></textarea>
+                </div>
+              )}
               <button type="submit" className="submit-btn" disabled={isIngesting}>
                 {isIngesting ? 'Processing Ingestion Pipeline...' : 'Index Document'}
               </button>

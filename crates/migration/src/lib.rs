@@ -1,4 +1,4 @@
-use sea_orm_migration::prelude::*;
+pub use sea_orm_migration::prelude::*;
 
 mod m20240602_000001_create_document_jobs_table;
 

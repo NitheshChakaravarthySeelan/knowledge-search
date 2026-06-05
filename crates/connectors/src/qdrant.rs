@@ -26,10 +26,20 @@ impl QdrantClient {
         let exists = collections.collections.iter().any(|c| c.name == collection_name);
         
         if !exists {
+            let mut sparse_map = std::collections::HashMap::new();
+            sparse_map.insert(
+                "sparse-text".to_string(),
+                qdrant_client::qdrant::SparseVectorParams::default(),
+            );
+            let sparse_config = qdrant_client::qdrant::SparseVectorConfig {
+                map: sparse_map,
+            };
+
             self.client
                 .create_collection(
                     CreateCollectionBuilder::new(collection_name.to_string())
                         .vectors_config(VectorParamsBuilder::new(vector_size, Distance::Cosine))
+                        .sparse_vectors_config(sparse_config)
                 )
                 .await?;
         }
@@ -49,6 +59,7 @@ impl QdrantClient {
                 "document_id": chunk.document_id.0,
                 "tenant_id": chunk.tenant_id.0,
                 "content": chunk.content,
+                "parent_content": chunk.parent_content,
                 "index": chunk.index,
                 "start_offset": chunk.start_offset,
                 "end_offset": chunk.end_offset,
@@ -61,6 +72,64 @@ impl QdrantClient {
                 vector.clone(),
                 payload,
             ));
+        }
+
+        self.client.upsert_points(
+            UpsertPointsBuilder::new(collection_name.to_string(), points)
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn upsert_chunks_hybrid(
+        &self,
+        collection_name: &str,
+        chunks: &[DocumentChunk],
+        dense_vectors: &[Vec<f32>],
+        sparse_vectors: &[(Vec<u32>, Vec<f32>)],
+    ) -> Result<()> {
+        let mut points = Vec::new();
+
+        for ((chunk, dense), (sparse_indices, sparse_values)) in chunks
+            .iter()
+            .zip(dense_vectors.iter())
+            .zip(sparse_vectors.iter())
+        {
+            let payload: Payload = serde_json::json!({
+                "document_id": chunk.document_id.0,
+                "tenant_id": chunk.tenant_id.0,
+                "content": chunk.content,
+                "parent_content": chunk.parent_content,
+                "index": chunk.index,
+                "start_offset": chunk.start_offset,
+                "end_offset": chunk.end_offset,
+                "metadata": chunk.metadata,
+            })
+            .try_into()?;
+
+            let mut vectors_map = std::collections::HashMap::new();
+            
+            vectors_map.insert("".to_string(), qdrant_client::qdrant::Vector::from(dense.clone()));
+            
+            let sparse = qdrant_client::qdrant::SparseVector {
+                indices: sparse_indices.clone(),
+                values: sparse_values.clone(),
+            };
+            vectors_map.insert("sparse-text".to_string(), qdrant_client::qdrant::Vector::from(sparse));
+
+            let named_vectors = qdrant_client::qdrant::NamedVectors {
+                vectors: vectors_map,
+            };
+
+            let vectors = qdrant_client::qdrant::Vectors::from(named_vectors);
+
+            let mut point = PointStruct::new(
+                chunk.id.clone(),
+                vec![0.0f32],
+                payload,
+            );
+            point.vectors = Some(vectors);
+
+            points.push(point);
         }
 
         self.client.upsert_points(
@@ -87,6 +156,36 @@ impl QdrantClient {
         }
 
         let response = self.client.search_points(search_builder).await?;
+        Ok(response.result)
+    }
+
+    pub async fn search_sparse(
+        &self,
+        collection_name: &str,
+        sparse_indices: Vec<u32>,
+        sparse_values: Vec<f32>,
+        limit: u64,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<ScoredPoint>> {
+        let sparse_idx = qdrant_client::qdrant::SparseIndices {
+            data: sparse_indices,
+        };
+
+        let mut search_builder = SearchPointsBuilder::new(collection_name.to_string(), sparse_values, limit)
+            .with_payload(true);
+
+        if let Some(tenant) = tenant_id {
+            search_builder = search_builder.filter(Filter::all([Condition::matches(
+                "tenant_id",
+                tenant.to_string(),
+            )]));
+        }
+
+        let mut search_points = search_builder.build();
+        search_points.sparse_indices = Some(sparse_idx);
+        search_points.vector_name = Some("sparse-text".to_string());
+
+        let response = self.client.search_points(search_points).await?;
         Ok(response.result)
     }
 }

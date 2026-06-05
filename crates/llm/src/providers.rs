@@ -144,6 +144,74 @@ impl LlmProvider for GeminiLlm {
     }
 }
 
+pub struct NvidiaLlm {
+    pub api_key: String,
+    client: Client,
+}
+
+impl NvidiaLlm {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            client: Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for NvidiaLlm {
+    async fn generate(&self, prompt: &str, system_instruction: Option<&str>) -> Result<String> {
+        if self.api_key.is_empty() || self.api_key == "mock" {
+            return Ok(generate_mock_response(prompt));
+        }
+
+        let mut messages = Vec::new();
+        if let Some(sys) = system_instruction {
+            messages.push(json!({ "role": "system", "content": sys }));
+        }
+        messages.push(json!({ "role": "user", "content": prompt }));
+
+        let response = self.client
+            .post("https://integrate.api.nvidia.com/v1/chat/completions")
+            .bearer_auth(&self.api_key)
+            .json(&json!({
+                "model": "meta/llama-3.3-70b-instruct",
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": 1024
+            }))
+            .send()
+            .await
+            .map_err(|e| AppError::ExternalService {
+                service: "NVIDIA LLM".to_string(),
+                message: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::ExternalService {
+                service: "NVIDIA LLM".to_string(),
+                message: format!("Status: {}, Body: {}", status, body),
+            });
+        }
+
+        let json_body: serde_json::Value = response.json().await.map_err(|e| AppError::ExternalService {
+            service: "NVIDIA LLM".to_string(),
+            message: format!("Failed to parse response body as JSON: {}", e),
+        })?;
+        let text = json_body["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| AppError::ExternalService {
+                service: "NVIDIA LLM".to_string(),
+                message: "Missing completion text in NVIDIA response".to_string(),
+            })?
+            .to_string();
+
+        Ok(text)
+    }
+}
+
 /// Generates a clean, mock markdown response summarizing query information.
 fn generate_mock_response(prompt: &str) -> String {
     format!(

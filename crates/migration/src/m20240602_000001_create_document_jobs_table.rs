@@ -20,6 +20,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(DocumentJobs::TenantId).string().not_null())
                     .col(ColumnDef::new(DocumentJobs::Title).string().not_null())
                     .col(ColumnDef::new(DocumentJobs::Content).string().not_null())
+                    .col(ColumnDef::new(DocumentJobs::FileExtension).string().null())
                     .col(
                         ColumnDef::new(DocumentJobs::Status)
                             .string()
@@ -51,6 +52,7 @@ enum DocumentJobs {
     TenantId,
     Title,
     Content,
+    FileExtension,
     Status,
     CreatedAt,
 }

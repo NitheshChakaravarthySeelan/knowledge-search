@@ -33,6 +33,7 @@ impl Chunker for RecursiveTextChunker {
                     document_id: document.id.clone(),
                     tenant_id: document.tenant_id.clone(),
                     content: document.content[start_offset..end_offset].to_string(),
+                    parent_content: None,
                     index: i,
                     start_offset: start_offset,
                     end_offset: end_offset,

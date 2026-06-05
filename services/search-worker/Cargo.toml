@@ -8,7 +8,9 @@ anyhow = "1.0.102"
 axum = "0.7.9"
 common = { version = "0.1.0", path = "../../crates/common" }
 connectors = { version = "0.1.0", path = "../../crates/connectors" }
+documents = { version = "0.1.0", path = "../../crates/documents" }
 embeddings = { version = "0.1.0", path = "../../crates/embeddings" }
+llm = { version = "0.1.0", path = "../../crates/llm" }
 search = { version = "0.1.0", path = "../../crates/search" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

@@ -62,7 +62,7 @@ impl Chunker for HierarchicalChunker {
 mod tests {
     use super::*;
     use crate::models::document::Document;
-    use common::types::{DocumentId, TenantId};
+    use common::types::{DocumentId, TenantId, SourceType};
 
     #[test]
     fn test_hierarchical_chunker() {
@@ -71,9 +71,11 @@ mod tests {
         let doc = Document {
             id: DocumentId("doc-123".to_string()),
             tenant_id: TenantId("tenant-1".to_string()),
-            content: content.to_string(),
+            source_type: SourceType::FileUpload,
             title: "Test Doc".to_string(),
+            content: content.to_string(),
             metadata: serde_json::Value::Null,
+            version: 1,
         };
 
         let chunks = chunker.chunk(&doc).unwrap();

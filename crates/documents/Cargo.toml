@@ -14,3 +14,4 @@ text-splitter = { version = "0.30.1", features = ["markdown"] }
 thiserror = "2.0.18"
 tokio = "1.52.3"
 uuid = { version = "1.23.2", features = ["v4"] }
+regex = "1.10.4"

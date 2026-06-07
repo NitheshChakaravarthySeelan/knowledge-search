@@ -4,6 +4,8 @@ use tokio::time::sleep;
 use tracing::{info, warn, error};
 use sea_orm::{Database, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, ActiveModelTrait, ActiveValue};
 
+mod pipeline;
+
 use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::{DocumentId, TenantId};
@@ -12,10 +14,8 @@ use entities::document_job;
 use sea_orm_migration::MigratorTrait;
 
 use connectors::QdrantClient;
-use documents::loaders::{Loader, FileLoader};
-use documents::chunkers::{Chunker, HierarchicalChunker};
 use documents::ParserRegistry;
-use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, EmbeddingInput, LocalHashingSparseEncoder, SparseEmbeddingProvider};
+use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, LocalHashingSparseEncoder};
 
 #[tokio::main]
 async fn main() {
@@ -66,8 +66,6 @@ async fn main() {
     };
 
     // 5. Initialize pipeline components
-    let loader = FileLoader::new();
-    let chunker = HierarchicalChunker::default();
     let parser_registry = ParserRegistry::new();
     let sparse_encoder = Arc::new(LocalHashingSparseEncoder::default());
 
@@ -88,6 +86,14 @@ async fn main() {
     if let Err(e) = qdrant_client.ensure_collection(collection_name, 1024).await {
         error!("Failed to ensure Qdrant collection: {:?}", e);
     }
+
+    // Initialize the Advanced Ingestion Pipeline coordinator
+    let ingestion_pipeline = Arc::new(pipeline::IngestionPipeline::new(
+        db.clone(),
+        qdrant_client.clone(),
+        embedding_provider.clone(),
+        sparse_encoder.clone(),
+    ));
 
     // 7. Worker Ingestion Loop
     info!("Ingestion Worker listening for pending document jobs...");
@@ -129,7 +135,7 @@ async fn main() {
                 }
             }
 
-            // STAGE 1: Extract/Load
+            // STAGE 1: Extract, Load and Route through Ingestion Pipeline
             let pipeline_result = (|| async {
                 // Determine raw bytes (handle base64 if it's a binary file)
                 let raw_bytes = if job.file_extension.as_deref() == Some("pdf") || job.file_extension.as_deref() == Some("docx") {
@@ -152,35 +158,30 @@ async fn main() {
                     String::from_utf8(raw_bytes).map_err(|e| format!("UTF8 conversion failed: {:?}", e))?
                 };
 
-                let doc = loader.load(doc_id.clone(), tenant.clone(), extracted_content.as_bytes(), job.title.clone())
-                    .map_err(|e| format!("Loader failed: {:?}", e))?;
-                
-                info!(job_id = job.id.to_string(), "Stage 1/4 (Extraction) - SUCCESS");
+                // `file_path` is the stable deduplication key. For legacy rows where
+                // it was not set, fall back to the human-readable `title` field.
+                let file_path = job.file_path.as_deref().unwrap_or(&job.title);
 
-                // STAGE 2: Chunking
-                let chunks = chunker.chunk(&doc).map_err(|e| format!("Chunking failed: {:?}", e))?;
-                info!(job_id = job.id.to_string(), count = chunks.len(), "Stage 2/4 (Chunking) - SUCCESS");
+                // Map file extension to a logical source type for graph tagging.
+                let source_type_str = match job.file_extension.as_deref() {
+                    Some("rs") | Some("py") | Some("js") | Some("ts") | Some("go") | Some("java") | Some("cpp") | Some("c") => "GitHub",
+                    _ => "FileUpload",
+                };
 
-                // STAGE 3 & 4: Embedding and Storage
-                for chunk in &chunks {
-                    let input = EmbeddingInput {
-                        text: chunk.content.clone(),
-                        user_id: None,
-                    };
-                    
-                    let dense_vector = embedding_provider.embed(&input).await
-                        .map_err(|e| format!("Dense embedding failed: {:?}", e))?;
-
-                    let sparse_vector = sparse_encoder.embed_sparse(&chunk.content).await
-                        .map_err(|e| format!("Sparse embedding failed: {:?}", e))?;
-
-                    qdrant_client.upsert_chunks_hybrid(
-                        collection_name,
-                        &[chunk.clone()],
-                        &[dense_vector.vector],
-                        &[(sparse_vector.indices, sparse_vector.values)],
-                    ).await.map_err(|e| format!("Storage failed: {:?}", e))?;
-                }
+                // Execute the full Advanced Ingestion Pipeline:
+                //   1. Change detection (SHA256)
+                //   2. Postgres graph: Document node + AST children + edges
+                //   3. Qdrant: hierarchical text chunks (dense + sparse)
+                //   4. Qdrant: AST node embeddings (precise symbol-level search)
+                ingestion_pipeline.process_job(
+                    &tenant,
+                    source_type_str,
+                    file_path,
+                    &job.title,
+                    &extracted_content,
+                    job.file_extension.as_deref(),
+                    collection_name,
+                ).await.map_err(|e| format!("Pipeline failed: {:?}", e))?;
 
                 Ok::<(), String>(())
             })().await;

@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use std::io::Read;
+use std::process::Command;
 use pdf_oxide::PdfDocument as PdfDoc;
 use dotext::*;
 
@@ -9,6 +10,39 @@ pub trait Parser: Send + Sync {
     
     /// Extract text content from raw bytes
     fn parse(&self, bytes: &[u8]) -> Result<String>;
+}
+
+pub struct DoclingParser;
+
+impl Parser for DoclingParser {
+    fn supported_extensions(&self) -> Vec<&'static str> {
+        vec!["pdf"]
+    }
+
+    fn parse(&self, bytes: &[u8]) -> Result<String> {
+        let temp_dir = std::env::temp_dir();
+        let temp_file_path = temp_dir.join(format!("{}.pdf", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_file_path, bytes)
+            .map_err(|e| anyhow!("Failed to write temporary PDF file: {}", e))?;
+        
+        let output = Command::new("python3")
+            .arg("scripts/ingest.py")
+            .arg(&temp_file_path)
+            .output();
+        
+        let _ = std::fs::remove_file(&temp_file_path);
+        
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+                } else {
+                    Err(anyhow!("Docling failed: {}", String::from_utf8_lossy(&out.stderr)))
+                }
+            }
+            Err(e) => Err(anyhow!("Failed to run Docling script: {}", e)),
+        }
+    }
 }
 
 pub struct PdfParser;
@@ -93,7 +127,7 @@ impl ParserRegistry {
     pub fn new() -> Self {
         Self {
             parsers: vec![
-                Box::new(PdfParser),
+                Box::new(DoclingParser),
                 Box::new(DocxParser),
                 Box::new(PlainTextParser),
             ],

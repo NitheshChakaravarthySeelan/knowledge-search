@@ -8,6 +8,9 @@ pub struct Model {
     pub id: uuid::Uuid,
     pub tenant_id: String,
     pub title: String,
+    /// Stable deduplication key (e.g. relative file path, S3 key, or connector-specific URI).
+    /// Added in migration 3. Falls back to `title` if NULL for legacy rows.
+    pub file_path: Option<String>,
     pub content: String,
     pub file_extension: Option<String>,
     pub status: String,

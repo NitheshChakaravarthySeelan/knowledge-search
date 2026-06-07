@@ -9,6 +9,7 @@ members = [
     "crates/search",
     "crates/llm",
     "crates/connectors",
+    "crates/mcp-server",
     "services/ingestion-worker",
     "services/sync-worker",
     "services/search-worker",

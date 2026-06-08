@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowledge-search"
+version = "0.1.0"
+description = "Agentic Knowledge Search Platform"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "langgraph",
+    "langgraph-checkpoint",
+    "langchain-openai",
+    "langchain-google-genai",
+    "mcp",
+    "docling",
+    "python-dotenv",
+]
+
+[tool.setuptools]
+packages = ["services"]

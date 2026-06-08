@@ -174,6 +174,7 @@ async fn main() {
                 //   3. Qdrant: hierarchical text chunks (dense + sparse)
                 //   4. Qdrant: AST node embeddings (precise symbol-level search)
                 ingestion_pipeline.process_job(
+                    &job,
                     &tenant,
                     source_type_str,
                     file_path,

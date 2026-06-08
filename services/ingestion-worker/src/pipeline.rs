@@ -14,7 +14,7 @@ use documents::chunkers::{Chunker, HierarchicalChunker};
 use documents::{GraphExtractor, ExtractedNode};
 use embeddings::{EmbeddingProvider, SparseEmbeddingProvider, EmbeddingInput};
 use connectors::QdrantClient;
-use entities::{kb_node, kb_graph_edge};
+use entities::{kb_node, kb_graph_edge, document_job};
 
 pub struct IngestionPipeline {
     db: DatabaseConnection,
@@ -47,6 +47,7 @@ impl IngestionPipeline {
     ///   4. Qdrant: AST child node embeddings (precise function/class-level search)
     pub async fn process_job(
         &self,
+        job: &document_job::Model,
         tenant_id: &TenantId,
         source_type: &str,
         file_path: &str,   // Stable identifier for deduplication (e.g. "src/lib.rs" or upload UUID)
@@ -55,12 +56,15 @@ impl IngestionPipeline {
         file_ext: Option<&str>,
         collection_name: &str,
     ) -> Result<()> {
+        self.update_job_status(job, 1, 10, "Extracting and Parsing...").await?;
+        
         // ── Step 1: SHA256 Content Hash ────────────────────────────────────────────
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         let content_hash = format!("{:x}", hasher.finalize());
 
         // ── Step 2: Postgres Graph — atomic transaction ────────────────────────────
+        self.update_job_status(job, 2, 25, "Upserting Graph...").await?;
         let doc_uuid = self.upsert_graph(
             tenant_id,
             source_type,
@@ -74,10 +78,14 @@ impl IngestionPipeline {
         // doc_uuid == None means content is unchanged; skip all downstream work.
         let doc_uuid = match doc_uuid {
             Some(id) => id,
-            None => return Ok(()),
+            None => {
+                self.update_job_status(job, 4, 100, "Content unchanged (skipped).").await?;
+                return Ok(());
+            }
         };
 
         // ── Step 3: Hierarchical Text Chunks → Qdrant ──────────────────────────────
+        self.update_job_status(job, 3, 50, "Embedding and Indexing Chunks...").await?;
         self.embed_and_upsert_chunks(
             tenant_id,
             doc_uuid,
@@ -87,8 +95,7 @@ impl IngestionPipeline {
         ).await?;
 
         // ── Step 4: AST Child Nodes → Qdrant ──────────────────────────────────────
-        // Re-extract to get children; extract_graph already ran inside the transaction
-        // but we only need children here — no DB writes needed.
+        self.update_job_status(job, 4, 90, "Embedding AST Nodes...").await?;
         let graph_data = GraphExtractor::extract(file_path, content, file_ext);
         if !graph_data.children.is_empty() {
             self.embed_and_upsert_ast_nodes(
@@ -98,6 +105,7 @@ impl IngestionPipeline {
                 collection_name,
             ).await?;
         }
+        self.update_job_status(job, 4, 100, "Ingestion complete.").await?;
 
         info!(
             tenant = tenant_id.0,
@@ -105,6 +113,27 @@ impl IngestionPipeline {
             "Ingestion complete: graph + chunks + AST nodes all indexed."
         );
 
+        Ok(())
+    }
+
+    async fn update_job_status(
+        &self,
+        job: &document_job::Model,
+        stage: i32,
+        percent: i32,
+        message: &str,
+    ) -> Result<()> {
+        let mut active_job: document_job::ActiveModel = job.clone().into();
+        active_job.progress_stage = ActiveValue::Set(Some(stage));
+        active_job.progress_percent = ActiveValue::Set(Some(percent));
+        active_job.progress_message = ActiveValue::Set(Some(message.to_string()));
+        if stage == 1 {
+            active_job.started_at = ActiveValue::Set(Some(chrono::Utc::now().naive_utc()));
+        }
+        if stage == 4 && percent == 100 {
+             active_job.completed_at = ActiveValue::Set(Some(chrono::Utc::now().naive_utc()));
+        }
+        active_job.update(&self.db).await?;
         Ok(())
     }
 
@@ -350,18 +379,41 @@ impl IngestionPipeline {
             "Hierarchical chunks generated."
         );
 
-        let mut doc_chunks  = Vec::with_capacity(chunks.len());
-        let mut dense_vecs  = Vec::with_capacity(chunks.len());
-        let mut sparse_vecs = Vec::with_capacity(chunks.len());
+        // Process chunks in batches of 50
+        let provider = self.embedding_provider.clone();
+        let sparse = self.sparse_provider.clone();
+        
+        let processed_data = common::batch_utils::process_in_batches(&chunks, 50, |batch| {
+            let provider = provider.clone();
+            let sparse = sparse.clone();
+            let batch = batch.to_vec();
+            
+            async move {
+                let mut results = Vec::with_capacity(batch.len());
+                let inputs: Vec<EmbeddingInput> = batch.iter()
+                    .map(|c| EmbeddingInput { text: c.content.clone(), user_id: None })
+                    .collect();
 
-        for chunk in chunks {
-            let input = EmbeddingInput { text: chunk.content.clone(), user_id: None };
-            let dense  = self.embedding_provider.embed(&input).await?;
-            let sparse = self.sparse_provider.embed_sparse(&chunk.content).await?;
+                let dense = provider.embed_batch(&inputs).await?;
+                
+                for (i, chunk) in batch.into_iter().enumerate() {
+                    let s = sparse.embed_sparse(&chunk.content).await?;
+                    results.push((chunk, dense[i].vector.clone(), (s.indices, s.values)));
+                }
 
+                Ok(results)
+            }
+        }).await?;
+
+        // Merge results
+        let mut doc_chunks = Vec::with_capacity(processed_data.len());
+        let mut dense_vecs = Vec::with_capacity(processed_data.len());
+        let mut sparse_vecs = Vec::with_capacity(processed_data.len());
+
+        for (chunk, dense, sparse) in processed_data {
             doc_chunks.push(chunk);
-            dense_vecs.push(dense.vector);
-            sparse_vecs.push((sparse.indices, sparse.values));
+            dense_vecs.push(dense);
+            sparse_vecs.push(sparse);
         }
 
         if !doc_chunks.is_empty() {
@@ -384,8 +436,6 @@ impl IngestionPipeline {
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  PRIVATE: AST child node embeddings → Qdrant
-    //  Each structural node (struct, fn, class, method) gets its own vector so
-    //  queries like "find the login() function" resolve to the exact symbol.
     // ─────────────────────────────────────────────────────────────────────────────
 
     async fn embed_and_upsert_ast_nodes(
@@ -400,7 +450,6 @@ impl IngestionPipeline {
         let mut sparse_vecs = Vec::with_capacity(children.len());
 
         for child in children {
-            // Embed the node's own content (e.g. "fn login()" or "class UserService").
             let input = EmbeddingInput {
                 text: child.content.clone(),
                 user_id: None,
@@ -413,15 +462,13 @@ impl IngestionPipeline {
                 })?;
             let sparse = self.sparse_provider.embed_sparse(&child.content).await?;
 
-            // Wrap into a DocumentChunk so QdrantClient can upsert it uniformly.
             let chunk = documents::models::document_chunk::DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_id: common::types::DocumentId(doc_uuid.to_string()),
                 tenant_id: tenant_id.clone(),
                 content: child.content.clone(),
-                // parent_content carries the node type + name for payload inspection
                 parent_content: Some(format!("[{}] {}", child.node_type, child.name)),
-                index: child.start_offset,   // repurpose index as byte offset
+                index: child.start_offset,
                 start_offset: child.start_offset,
                 end_offset: child.end_offset,
                 metadata: serde_json::json!({

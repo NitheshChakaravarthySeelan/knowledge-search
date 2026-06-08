@@ -38,7 +38,21 @@ impl QdrantClient {
             self.client
                 .create_collection(
                     CreateCollectionBuilder::new(collection_name.to_string())
-                        .vectors_config(VectorParamsBuilder::new(vector_size, Distance::Cosine))
+                        .vectors_config(
+                            qdrant_client::qdrant::VectorsConfig {
+                                config: Some(qdrant_client::qdrant::vectors_config::Config::ParamsMap(
+                                    qdrant_client::qdrant::VectorParamsMap {
+                                        map: [
+                                            ("dense-text".to_string(), qdrant_client::qdrant::VectorParams {
+                                                size: vector_size,
+                                                distance: Distance::Cosine as i32,
+                                                ..Default::default()
+                                            })
+                                        ].into_iter().collect(),
+                                    }
+                                ))
+                            }
+                        )
                         .sparse_vectors_config(sparse_config)
                 )
                 .await?;
@@ -108,7 +122,7 @@ impl QdrantClient {
 
             let mut vectors_map = std::collections::HashMap::new();
             
-            vectors_map.insert("".to_string(), qdrant_client::qdrant::Vector::from(dense.clone()));
+            vectors_map.insert("dense-text".to_string(), qdrant_client::qdrant::Vector::from(dense.clone()));
             
             let sparse = qdrant_client::qdrant::SparseVector {
                 indices: sparse_indices.clone(),
@@ -155,7 +169,10 @@ impl QdrantClient {
             )]));
         }
 
-        let response = self.client.search_points(search_builder).await?;
+        let mut search_points = search_builder.build();
+        search_points.vector_name = Some("dense-text".to_string());
+
+        let response = self.client.search_points(search_points).await?;
         Ok(response.result)
     }
 

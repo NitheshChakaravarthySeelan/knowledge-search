@@ -25,8 +25,14 @@ impl Parser for DoclingParser {
         std::fs::write(&temp_file_path, bytes)
             .map_err(|e| anyhow!("Failed to write temporary PDF file: {}", e))?;
         
-        let output = Command::new("python3")
-            .arg("scripts/ingest.py")
+        // Use environment variables for configuration, defaulting to relative paths
+        let python_path = std::env::var("PYTHON_EXECUTABLE_PATH")
+            .unwrap_or_else(|_| ".venv/bin/python3".to_string());
+        let script_path = std::env::var("INGEST_SCRIPT_PATH")
+            .unwrap_or_else(|_| "scripts/ingest.py".to_string());
+
+        let output = Command::new(python_path)
+            .arg(script_path)
             .arg(&temp_file_path)
             .output();
         

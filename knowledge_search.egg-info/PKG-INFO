@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: knowledge-search
+Version: 0.1.0
+Summary: Agentic Knowledge Search Platform
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: langgraph
+Requires-Dist: langgraph-checkpoint
+Requires-Dist: langchain-openai
+Requires-Dist: langchain-google-genai
+Requires-Dist: mcp
+Requires-Dist: docling
+Requires-Dist: python-dotenv

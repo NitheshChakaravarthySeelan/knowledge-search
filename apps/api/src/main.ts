@@ -45,7 +45,7 @@ const app = new Elysia()
       const {
         query,
         limit = 5,
-        tenant_id = 'tenant_corporate_1'
+        tenant_id = 'default'
       } = body;
 
       console.log(
@@ -98,30 +98,18 @@ const app = new Elysia()
   .post(
     '/api/ask',
     async ({ body }) => {
-      const {
-        question,
-        tenant_id = 'tenant_corporate_1'
-      } = body;
-
-      console.log(
-        `[RAG TRIGGER] Forwarding question to Rust Search Worker: "${question}"`
-      );
-
+      const { question } = body;
+      console.log(`[RAG TRIGGER] Forwarding to Agent Service: "${question}"`);
       const startTime = Date.now();
 
       try {
-        const response = await fetch(
-          `http://localhost:8081/ask?question=${encodeURIComponent(
-            question
-          )}&tenant_id=${tenant_id}`
-        );
+        const response = await fetch('http://localhost:8001/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: question })
+        });
 
-        if (!response.ok) {
-          throw new Error(
-            `Rust Search Worker returned ${response.status}`
-          );
-        }
-
+        if (!response.ok) throw new Error(`Agent returned ${response.status}`);
         const data = await response.json();
 
         return {
@@ -131,11 +119,11 @@ const app = new Elysia()
         };
       } catch (error) {
         console.error('[RAG ERROR]', error);
-
         return {
           question,
-          answer: 'Failed to connect to the answer engine.',
-          error: 'Service unavailable'
+          answer: 'Failed to connect to the agent.',
+          error: 'Service unavailable',
+          latency_ms: Date.now() - startTime
         };
       }
     },
@@ -157,7 +145,7 @@ const app = new Elysia()
         fileExtension
       } = body;
 
-      const tenant_id = 'tenant_corporate_1';
+      const tenant_id = 'default';
 
       console.log(
         `[INGEST TRIGGER] Saving document job: "${title}"`
@@ -217,15 +205,18 @@ const app = new Elysia()
         type: 'Notion',
         name: 'Company Knowledge Base',
         status: 'connected',
-        last_sync: '2026-05-29T11:47:00Z'
+        last_sync: '2026-05-29T11:47:00Z',
+        tenant_id: 'default'
       },
       {
         id: 'conn_slack_002',
         type: 'Slack',
         name: '#eng-announcements',
         status: 'disconnected',
-        last_sync: null
+        last_sync: null,
+        tenant_id: 'default'
       }
+
     ]
   }))
 
@@ -241,6 +232,24 @@ const app = new Elysia()
       status: 'running',
       message:
         'Sync crawler task dispatched to background Rust Sync Worker.'
+    };
+  })
+
+  // Get Document Ingestion Status
+  .get('/api/documents/:id/status', async ({ params }) => {
+    const result = await sql`
+      SELECT progress_stage, progress_percent, progress_message, status 
+      FROM document_jobs 
+      WHERE id = ${params.id}
+    `;
+    
+    if (result.length === 0) return { error: "Job not found" };
+    
+    return {
+      stage: result[0].progress_stage,
+      percent: result[0].progress_percent,
+      message: result[0].progress_message,
+      status: result[0].status
     };
   })
 

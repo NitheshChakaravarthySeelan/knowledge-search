@@ -1,6 +1,6 @@
 use anyhow::Result;
 use connectors::QdrantClient;
-use embeddings::providers::OpenAiProvider;
+use embeddings::providers::NvidiaProvider;
 use embeddings::sparse::LocalHashingSparseEncoder;
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt, transport::stdio};
 use schemars::JsonSchema;
@@ -33,6 +33,8 @@ struct IngestParams {
 impl MyServer {
     #[tool(description = "Performs a hybrid search over the knowledge base.")]
     async fn search_knowledge_base(&self, Parameters(params): Parameters<SearchParams>) -> String {
+        eprintln!("DEBUG: Rust MCP server received search request for query: {}", params.query);
+        
         let tenant_id_str = params.tenant_id.unwrap_or_else(|| "default".to_string());
         let tenant_id = common::types::TenantId(tenant_id_str);
         let limit = params.limit.unwrap_or(5) as usize;
@@ -42,8 +44,14 @@ impl MyServer {
             .search(&tenant_id, &params.query, limit)
             .await
         {
-            Ok(results) => serde_json::to_string(&results).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error: {}", e),
+            Ok(results) => {
+                eprintln!("DEBUG: Rust MCP search successful.");
+                serde_json::to_string(&results).unwrap_or_else(|e| e.to_string())
+            },
+            Err(e) => {
+                eprintln!("DEBUG: Rust MCP search error: {}", e);
+                format!("Error: {}", e)
+            },
         }
     }
 
@@ -71,8 +79,8 @@ impl MyServer {
 async fn main() -> Result<()> {
     let config = common::config::AppConfig::load_from_env()?;
 
-    let embedding_provider = Arc::new(OpenAiProvider::new(
-        config.openai_api_key.unwrap_or_default(),
+    let embedding_provider = Arc::new(NvidiaProvider::new(
+        config.nvidia_api_key.unwrap_or_default(),
     ));
     let sparse_provider = Arc::new(LocalHashingSparseEncoder::default());
     let qdrant_client = Arc::new(QdrantClient::new(&config.qdrant_url)?);

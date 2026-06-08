@@ -13,9 +13,13 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(DocumentJobs::Table)
-                    // Allow NULL so existing rows are not broken. Workers treat NULL as
-                    // falling back to `title` for backwards compatibility.
                     .add_column(ColumnDef::new(DocumentJobs::FilePath).string().null())
+                    .add_column(ColumnDef::new(DocumentJobs::ProgressStage).integer().default(0))
+                    .add_column(ColumnDef::new(DocumentJobs::ProgressPercent).integer().default(0))
+                    .add_column(ColumnDef::new(DocumentJobs::ProgressMessage).string().null())
+                    .add_column(ColumnDef::new(DocumentJobs::ErrorMessage).string().null())
+                    .add_column(ColumnDef::new(DocumentJobs::StartedAt).timestamp().null())
+                    .add_column(ColumnDef::new(DocumentJobs::CompletedAt).timestamp().null())
                     .to_owned(),
             )
             .await
@@ -27,6 +31,12 @@ impl MigrationTrait for Migration {
                 Table::alter()
                     .table(DocumentJobs::Table)
                     .drop_column(DocumentJobs::FilePath)
+                    .drop_column(DocumentJobs::ProgressStage)
+                    .drop_column(DocumentJobs::ProgressPercent)
+                    .drop_column(DocumentJobs::ProgressMessage)
+                    .drop_column(DocumentJobs::ErrorMessage)
+                    .drop_column(DocumentJobs::StartedAt)
+                    .drop_column(DocumentJobs::CompletedAt)
                     .to_owned(),
             )
             .await
@@ -37,4 +47,10 @@ impl MigrationTrait for Migration {
 enum DocumentJobs {
     Table,
     FilePath,
+    ProgressStage,
+    ProgressPercent,
+    ProgressMessage,
+    ErrorMessage,
+    StartedAt,
+    CompletedAt,
 }

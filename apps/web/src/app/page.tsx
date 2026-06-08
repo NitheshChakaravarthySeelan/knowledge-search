@@ -37,7 +37,8 @@ export default function Home() {
   const [docTitle, setDocTitle] = useState('');
   const [docContent, setDocContent] = useState('');
   const [isIngesting, setIsIngesting] = useState(false);
-  const [ingestionStep, setIngestionStep] = useState<number>(0); // 0=None, 1=Loaded, 2=Chunked, 3=Embedded, 4=Stored
+  const [ingestionStep, setIngestionStep] = useState<number>(0);
+  const [ingestionPercent, setIngestionPercent] = useState<number>(0);
   const [ingestedId, setIngestedId] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [fileExtension, setFileExtension] = useState<string | null>(null);
@@ -159,44 +160,21 @@ export default function Home() {
     }
   };
 
-  // Handler: Document Ingestion Pipeline simulation
+  // Handler: Document Ingestion Pipeline
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    // Updated validation: title is required, and either content OR a file must be present
     if (!docTitle.trim()) return;
     if (!file && !docContent.trim()) return;
 
     setIsIngesting(true);
-    setIngestionStep(1); // Stage 1: Loaded/Extracted
+    setIngestionStep(0); 
     setIngestedId(null);
 
-    // Determine what content to send
     const finalContent = file ? base64Content : docContent;
 
-    // Simulate stepping through stages with beautiful stepper intervals
-    setTimeout(() => {
-      setIngestionStep(2); // Stage 2: Chunked
-      setTimeout(() => {
-        setIngestionStep(3); // Stage 3: Embedded
-        setTimeout(() => {
-          setIngestionStep(4); // Stage 4: Stored (Completed)
-          setQdrantCount(prev => prev + 4); // increment vector count by 4 simulated chunks
-          setPostgresCount(prev => prev + 1); // increment documents count by 1
-          setIngestedId(`doc_${Math.random().toString(36).substring(7)}`);
-          setIsIngesting(false);
-          setDocTitle('');
-          setDocContent('');
-          setFile(null);
-          setFileExtension(null);
-          setBase64Content('');
-        }, 800);
-      }, 800);
-    }, 800);
-
-    // Send real call in background if gateway is available
     try {
-      await fetch('http://localhost:8000/api/documents', {
+      const response = await fetch('http://localhost:8000/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -205,8 +183,49 @@ export default function Home() {
           fileExtension: fileExtension 
         })
       });
-    } catch (_) {}
+      const data = await response.json();
+      if (data.success) {
+        setIngestedId(data.document_id);
+      } else {
+        setIsIngesting(false);
+        alert("Ingestion failed: " + data.error);
+      }
+    } catch (err) {
+      setIsIngesting(false);
+      alert("Failed to connect to backend");
+    }
   };
+
+  // Poll for ingestion status
+  useEffect(() => {
+    if (!isIngesting || !ingestedId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/documents/${ingestedId}/status`);
+        const data = await res.json();
+        
+        if (data.error) {
+            console.error("Job not found");
+            clearInterval(interval);
+            setIsIngesting(false);
+            return;
+        }
+
+        setIngestionStep(data.stage || 0);
+        setIngestionPercent(data.percent || 0);
+        
+        if (data.status === 'completed' || data.status === 'failed') {
+          clearInterval(interval);
+          setIsIngesting(false);
+          if (data.status === 'failed') alert("Ingestion failed: " + data.message);
+        }
+      } catch (err) {
+        console.error("Failed to poll status", err);
+      }
+    }, 2000); // Poll every 2 seconds
+    return () => clearInterval(interval);
+  }, [isIngesting, ingestedId]);
 
   // Handler: Connectors Sync crawler trigger
   const handleSync = async (id: string) => {
@@ -418,34 +437,23 @@ export default function Home() {
             </form>
 
             {/* Stepper Status Indicators */}
-            {ingestionStep > 0 && (
+            {isIngesting && (
               <div className="pipeline-stepper">
-                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
-                  Rust Pipeline Pipeline Stages:
+                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+                  Backend Ingestion: {ingestionPercent}%
                 </div>
-                <div className={`step-item ${ingestionStep >= 1 ? (ingestionStep === 1 ? 'active' : 'completed') : ''}`}>
-                  <span className="step-indicator"></span>
-                  <span>Stage 1/4: Text Extraction & Load (TextLoader)</span>
-                </div>
-                <div className={`step-item ${ingestionStep >= 2 ? (ingestionStep === 2 ? 'active' : 'completed') : ''}`}>
-                  <span className="step-indicator"></span>
-                  <span>Stage 2/4: Chunk Splitting (RecursiveTextChunker)</span>
-                </div>
-                <div className={`step-item ${ingestionStep >= 3 ? (ingestionStep === 3 ? 'active' : 'completed') : ''}`}>
-                  <span className="step-indicator"></span>
-                  <span>Stage 3/4: Semantic Vector Embedding (GeminiProvider)</span>
-                </div>
-                <div className={`step-item ${ingestionStep >= 4 ? (ingestionStep === 4 ? 'active' : 'completed') : ''}`}>
-                  <span className="step-indicator"></span>
-                  <span>Stage 4/4: Vector Store Database Indexing (Qdrant)</span>
-                </div>
+                <progress value={ingestionPercent} max="100" style={{ width: '100%', height: '8px' }} />
 
-                {ingestedId && (
-                  <p style={{ fontSize: '0.8rem', color: 'var(--color-success)', marginTop: '0.5rem', fontFamily: 'var(--font-mono)' }}>
-                    ✓ Ingest Completed. Generated ID: {ingestedId}
-                  </p>
-                )}
+                <p style={{ fontSize: '0.85rem', color: 'var(--color-secondary)', marginTop: '0.5rem', fontFamily: 'var(--font-mono)' }}>
+                  {ingestionStep > 0 ? `Stage ${ingestionStep}/4: In progress...` : 'Connecting to pipeline...'}
+                </p>
               </div>
+            )}
+            
+            {!isIngesting && ingestedId && (
+                <p style={{ fontSize: '0.8rem', color: 'var(--color-success)', marginTop: '0.5rem', fontFamily: 'var(--font-mono)' }}>
+                  ✓ Ingestion complete for ID: {ingestedId}
+                </p>
             )}
           </div>
         </section>

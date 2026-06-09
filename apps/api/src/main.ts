@@ -97,10 +97,9 @@ const app = new Elysia()
   // Generative RAG
   .post(
     '/api/ask',
-    async ({ body }) => {
+    async ({ body, set }) => {
       const { question } = body;
       console.log(`[RAG TRIGGER] Forwarding to Agent Service: "${question}"`);
-      const startTime = Date.now();
 
       try {
         const response = await fetch('http://localhost:8001/ask', {
@@ -109,21 +108,20 @@ const app = new Elysia()
           body: JSON.stringify({ query: question })
         });
 
-        if (!response.ok) throw new Error(`Agent returned ${response.status}`);
-        const data = await response.json();
+        if (!response.ok) {
+            set.status = response.status;
+            return { error: 'Agent failed' };
+        }
 
-        return {
-          question,
-          answer: data.answer,
-          latency_ms: Date.now() - startTime
-        };
+        // Forward the stream directly
+        return new Response(response.body, {
+          headers: { 'Content-Type': 'text/plain' }
+        });
       } catch (error) {
         console.error('[RAG ERROR]', error);
         return {
-          question,
           answer: 'Failed to connect to the agent.',
-          error: 'Service unavailable',
-          latency_ms: Date.now() - startTime
+          error: 'Service unavailable'
         };
       }
     },

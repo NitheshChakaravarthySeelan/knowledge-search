@@ -5,7 +5,7 @@ pub mod fusion;
 pub mod hybrid;
 
 pub use retrievers::{Retriever, SearchResult, VectorRetriever};
-pub use rerankers::{Reranker, LocalReranker};
+pub use rerankers::{Reranker, LocalReranker, CohereReranker};
 pub use service::SearchService;
 pub use fusion::ReciprocalRankFusion;
 pub use hybrid::HybridRetriever;

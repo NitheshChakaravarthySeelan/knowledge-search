@@ -4,7 +4,7 @@ use embeddings::providers::NvidiaProvider;
 use embeddings::sparse::LocalHashingSparseEncoder;
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt, transport::stdio};
 use schemars::JsonSchema;
-use search::{HybridRetriever, LocalReranker, SearchService};
+use search::{HybridRetriever, CohereReranker, SearchService};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::process::Command;
@@ -92,7 +92,10 @@ async fn main() -> Result<()> {
         "knowledge_base".to_string(),
     ));
 
-    let reranker = Arc::new(LocalReranker);
+    let cohere_api_key = config.cohere_api_key.ok_or_else(|| {
+        anyhow::anyhow!("COHERE_API_KEY not found in environment")
+    })?;
+    let reranker = Arc::new(CohereReranker::new(cohere_api_key));
     let search_service = Arc::new(SearchService::new(retriever, reranker));
 
     let service = MyServer { search_service };

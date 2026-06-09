@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
     pub nvidia_api_key: Option<String>,
+    pub cohere_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -31,6 +32,7 @@ impl AppConfig {
         let openai_api_key = env::var("OPENAI_API_KEY").ok();
         let gemini_api_key = env::var("GEMINI_API_KEY").ok();
         let nvidia_api_key = env::var("NVIDIA_API_KEY").ok();
+        let cohere_api_key = env::var("COHERE_API_KEY").ok();
 
         Ok(Self {
             environment,
@@ -40,6 +42,7 @@ impl AppConfig {
             openai_api_key,
             gemini_api_key,
             nvidia_api_key,
+            cohere_api_key,
         })
     }
 }

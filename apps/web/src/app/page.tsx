@@ -138,8 +138,8 @@ export default function Home() {
 
     setIsAsking(true);
     setSearchResults([]); // Hide chunks to focus on the answer
-    setAiAnswer(null);
-    
+    setAiAnswer(""); // Clear previous AI answers
+
     try {
       const response = await fetch('http://localhost:8000/api/ask', {
         method: 'POST',
@@ -147,13 +147,22 @@ export default function Home() {
         body: JSON.stringify({ question: searchQuery })
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        setAiAnswer(data.answer);
-      } else {
-        setAiAnswer("Error: Failed to fetch answer from LLM.");
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullAnswer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        fullAnswer += chunk;
+        setAiAnswer(fullAnswer); // Updates the UI piece-by-piece
       }
     } catch (err) {
+      console.error('[RAG ERROR]', err);
       setAiAnswer("Error: Cannot connect to Answer Engine.");
     } finally {
       setIsAsking(false);
@@ -325,7 +334,7 @@ export default function Home() {
 
             {/* Results Output */}
             <div className="results-wrapper">
-              {aiAnswer && (
+              {aiAnswer !== null && (
                 <div className="glass-card" style={{ padding: '1rem', marginBottom: '1rem', border: '1px solid var(--color-secondary)' }}>
                   <h3 style={{ margin: '0 0 0.5rem 0', color: 'var(--color-secondary)' }}>AI Answer</h3>
                   <p style={{ whiteSpace: 'pre-wrap' }}>{aiAnswer}</p>

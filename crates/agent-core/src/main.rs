@@ -161,12 +161,9 @@ async fn ask_handler(
                         .event("reasoning")
                         .data(reasoning_text));
                 }
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Final(final_content))) => {
-                    let final_text = format!("{:?}", final_content);
-                    info!(text_len = final_text.len(), "yielding Final content");
-                    yield Ok(Event::default()
-                        .event("final")
-                        .data(final_text));
+                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Final(_))) => {
+                    // Final completion metadata — handled by FinalResponse below
+                    info!("stream final item received (metadata only)");
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     let final_text = response.response();

@@ -37,9 +37,18 @@ export async function askQuestion(
     throw new Error(`Ask failed: ${response.status} ${errText}`);
   }
 
-  const data = await response.json();
-  console.log('[askQuestion] answer received, length', data.answer?.length ?? 0);
-  onChunk(data.answer ?? '');
+  if (!response.body) throw new Error('No response body');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullAnswer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    fullAnswer += decoder.decode(value, { stream: true });
+    onChunk(fullAnswer);
+  }
 }
 
 export async function ingestDocument(

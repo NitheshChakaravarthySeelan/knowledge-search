@@ -98,7 +98,7 @@ const app = new Elysia()
     }
   )
 
-  // Generative RAG
+  // Generative RAG — streaming
   .post(
     '/api/ask',
     async ({ body, set }) => {
@@ -106,7 +106,7 @@ const app = new Elysia()
       console.log(`[RAG TRIGGER] Forwarding to Agent Service: "${question}"`);
 
       try {
-        const response = await fetch('http://localhost:8001/ask_sync', {
+        const response = await fetch('http://localhost:8001/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: question })
@@ -117,9 +117,54 @@ const app = new Elysia()
             return { error: 'Agent failed' };
         }
 
-        const data = await response.json();
-        console.log(`[RAG] Answer received, length: ${data.answer.length}`);
-        return { answer: data.answer };
+        // Read agent-core SSE stream, extract data: lines, forward as raw text
+        const agentReader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        set.headers['Content-Type'] = 'text/plain';
+
+        return new ReadableStream({
+          async start(controller) {
+            try {
+              while (true) {
+                const { done, value } = await agentReader.read();
+                if (done) break;
+                sseBuffer += decoder.decode(value, { stream: true });
+
+                const parts = sseBuffer.split('\n\n');
+                sseBuffer = parts.pop() ?? '';
+
+                for (const part of parts) {
+                  const lines = part.split('\n');
+                  let eventType = '';
+                  const dataLines: string[] = [];
+                  for (const line of lines) {
+                    if (line.startsWith('event: ')) {
+                      eventType = line.slice(7);
+                    } else if (line.startsWith('data: ')) {
+                      dataLines.push(line.slice(6));
+                    }
+                  }
+                  // Skip final (FinalResponse is redundant) and reasoning (internal thoughts)
+                  if (eventType === 'final' || eventType === 'reasoning') continue;
+                  // Rejoin multi-line data with \n (SSE splits \n into separate data: lines)
+                  if (dataLines.length > 0) {
+                    controller.enqueue(new TextEncoder().encode(dataLines.join('\n')));
+                  }
+                }
+              }
+            } catch (e) {
+              console.error('[RAG STREAM ERROR]', e);
+            } finally {
+              controller.close();
+            }
+          },
+          cancel() {
+            console.log('[RAG] Stream cancelled by client');
+            agentReader.cancel();
+          }
+        });
       } catch (error) {
         console.error('[RAG ERROR]', error);
         return {

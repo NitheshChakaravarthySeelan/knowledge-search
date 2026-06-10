@@ -21,6 +21,7 @@ search = { version = "0.1.0", path = "../search" }
 connectors = { version = "0.1.0", path = "../connectors" }
 embeddings = { version = "0.1.0", path = "../embeddings" }
 dotenvy = "0.15"
+tracing = "0.1.44"
 
 # Rig Framework
 rig = { version = "0.38.1", features = ["gemini-grpc"] }

@@ -9,6 +9,10 @@ const sql = postgres(
     'postgresql://postgres:postgres@localhost:5432/knowledge_os'
 );
 
+async function main() {
+// Ensure metadata column exists on document_jobs
+await sql`ALTER TABLE document_jobs ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb`;
+
 const app = new Elysia()
   .use(cors())
 
@@ -102,7 +106,7 @@ const app = new Elysia()
       console.log(`[RAG TRIGGER] Forwarding to Agent Service: "${question}"`);
 
       try {
-        const response = await fetch('http://localhost:8001/ask', {
+        const response = await fetch('http://localhost:8001/ask_sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: question })
@@ -113,10 +117,9 @@ const app = new Elysia()
             return { error: 'Agent failed' };
         }
 
-        // Forward the stream directly
-        return new Response(response.body, {
-          headers: { 'Content-Type': 'text/plain' }
-        });
+        const data = await response.json();
+        console.log(`[RAG] Answer received, length: ${data.answer.length}`);
+        return { answer: data.answer };
       } catch (error) {
         console.error('[RAG ERROR]', error);
         return {
@@ -251,8 +254,90 @@ const app = new Elysia()
     };
   })
 
+  // List All Documents
+  .get('/api/documents', async () => {
+    const result = await sql`
+      SELECT id, tenant_id, title, file_extension, file_path, status, metadata, created_at, completed_at
+      FROM document_jobs
+      ORDER BY created_at DESC
+      LIMIT 100
+    `;
+    return { documents: result, total: result.length };
+  })
+
+  // Get Single Document
+  .get('/api/documents/:id', async ({ params }) => {
+    const result = await sql`
+      SELECT id, tenant_id, title, content, file_extension, file_path, status, metadata, created_at, completed_at
+      FROM document_jobs
+      WHERE id = ${params.id}
+    `;
+    if (result.length === 0) return { error: 'Document not found' };
+    return result[0];
+  })
+
+  // Update Document (title, metadata)
+  .put('/api/documents/:id', async ({ params, body }) => {
+    const { title, metadata } = body as { title?: string; metadata?: Record<string, unknown> };
+
+    if (title !== undefined && metadata !== undefined) {
+      const result = await sql`
+        UPDATE document_jobs
+        SET title = ${title}, metadata = ${JSON.stringify(metadata)}::jsonb
+        WHERE id = ${params.id}
+        RETURNING id, tenant_id, title, file_extension, file_path, status, metadata, created_at, completed_at
+      `;
+      if (result.length === 0) return { error: 'Document not found' };
+      return result[0];
+    }
+
+    if (title !== undefined) {
+      const result = await sql`
+        UPDATE document_jobs
+        SET title = ${title}
+        WHERE id = ${params.id}
+        RETURNING id, tenant_id, title, file_extension, file_path, status, metadata, created_at, completed_at
+      `;
+      if (result.length === 0) return { error: 'Document not found' };
+      return result[0];
+    }
+
+    if (metadata !== undefined) {
+      const result = await sql`
+        UPDATE document_jobs
+        SET metadata = ${JSON.stringify(metadata)}::jsonb
+        WHERE id = ${params.id}
+        RETURNING id, tenant_id, title, file_extension, file_path, status, metadata, created_at, completed_at
+      `;
+      if (result.length === 0) return { error: 'Document not found' };
+      return result[0];
+    }
+
+    return { error: 'No fields to update' };
+  })
+
+  // Delete Document (Postgres + Qdrant)
+  .delete('/api/documents/:id', async ({ params }) => {
+    const result = await sql`
+      DELETE FROM document_jobs WHERE id = ${params.id} RETURNING id
+    `;
+    if (result.length === 0) return { error: 'Document not found' };
+
+    // Also delete vectors from Qdrant via search-worker
+    try {
+      await fetch(`http://localhost:8081/documents/${params.id}`, { method: 'DELETE' });
+    } catch (e) {
+      console.warn(`[DELETE] Failed to delete vectors from Qdrant for ${params.id}:`, e);
+    }
+
+    return { success: true, document_id: params.id };
+  })
+
   .listen(port);
 
 console.log(
   `[GATEWAY STARTED] Bun API Gateway is running at http://localhost:${port}`
 );
+}
+
+main().catch(console.error);

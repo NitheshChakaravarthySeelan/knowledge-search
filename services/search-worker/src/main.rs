@@ -1,18 +1,19 @@
 use axum::{
-    extract::{Query, State},
-    routing::get,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{delete, get},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::TenantId;
 use connectors::QdrantClient;
-use embeddings::{NvidiaProvider, GeminiProvider, OpenAiProvider, EmbeddingProvider, LocalHashingSparseEncoder};
-use llm::{NvidiaLlm, GeminiLlm, OpenAiLlm, LlmProvider, RagService};
+use embeddings::{EmbeddingProvider, LocalHashingSparseEncoder, NvidiaProvider};
+use llm::{GeminiLlm, LlmProvider, NvidiaLlm, OpenAiLlm, RagService};
 use search::retrievers::{Retriever, SearchResult};
 use search::HybridRetriever;
 
@@ -32,6 +33,8 @@ struct AskParams {
 struct AppState {
     retriever: Arc<dyn Retriever>,
     rag_service: Arc<RagService>,
+    qdrant_client: Arc<QdrantClient>,
+    collection_name: String,
 }
 
 #[tokio::main]
@@ -67,19 +70,20 @@ async fn main() {
     let retriever = Arc::new(HybridRetriever::new(
         embedding_provider,
         sparse_provider,
-        qdrant_client,
+        qdrant_client.clone(),
         "knowledge_base".to_string(),
     ));
 
     // 5. Setup RAG Service
     let rag_service = Arc::new(RagService::new(retriever.clone(), llm_provider));
 
-    let state = Arc::new(AppState { retriever, rag_service });
+    let state = Arc::new(AppState { retriever, rag_service, qdrant_client, collection_name: "knowledge_base".to_string() });
 
     // 6. Build router
     let app = Router::new()
         .route("/search", get(search_handler))
         .route("/ask", get(ask_handler))
+        .route("/documents/{id}", delete(delete_document_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await.unwrap();
@@ -103,6 +107,31 @@ async fn search_handler(
     }
 }
 
+#[derive(Serialize)]
+struct DeleteResponse {
+    success: bool,
+    message: String,
+}
+
+async fn delete_document_handler(
+    State(state): State<Arc<AppState>>,
+    Path(document_id): Path<String>,
+) -> Result<Json<DeleteResponse>, StatusCode> {
+    match state
+        .qdrant_client
+        .delete_points_by_document_id(&state.collection_name, &document_id)
+        .await
+    {
+        Ok(_) => Ok(Json(DeleteResponse {
+            success: true,
+            message: format!("Deleted chunks for document {}", document_id),
+        })),
+        Err(e) => {
+            error!("Failed to delete document from Qdrant: {:?}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
 async fn ask_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AskParams>,

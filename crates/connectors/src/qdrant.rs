@@ -1,8 +1,8 @@
 use anyhow::Result;
 use qdrant_client::{
     qdrant::{
-        CreateCollectionBuilder, Distance, VectorParamsBuilder, 
-        Filter, Condition, ScoredPoint, SearchPointsBuilder, UpsertPointsBuilder, PointStruct,
+        Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointStruct,
+        ScoredPoint, SearchPointsBuilder, UpsertPointsBuilder,
     },
     Payload, Qdrant,
 };
@@ -174,6 +174,22 @@ impl QdrantClient {
 
         let response = self.client.search_points(search_points).await?;
         Ok(response.result)
+    }
+
+    pub async fn delete_points_by_document_id(
+        &self,
+        collection_name: &str,
+        document_id: &str,
+    ) -> Result<()> {
+        let filter = Filter::must([Condition::matches("document_id", document_id.to_string())]);
+        self.client
+            .delete_points(
+                DeletePointsBuilder::new(collection_name.to_string())
+                    .points(filter)
+                    .wait(true),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn search_sparse(

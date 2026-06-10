@@ -9,15 +9,19 @@ anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 schemars = "1.0"
-axum = "0.8"
-tracing = "0.1"
-dotenvy = "0.15"
+# Streaming
+tokio-stream = "0.1"
+futures-util = "0.3"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["macros"] }
 
 # Internal crates
 common = { version = "0.1.0", path = "../common" }
 search = { version = "0.1.0", path = "../search" }
 connectors = { version = "0.1.0", path = "../connectors" }
 embeddings = { version = "0.1.0", path = "../embeddings" }
+dotenvy = "0.15"
 
 # Rig Framework
-rig = { version = "0.38.1", features = ["gemini-grpc", "derive"] }
+rig = { version = "0.38.1", features = ["gemini-grpc"] }
+

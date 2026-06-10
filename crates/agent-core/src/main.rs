@@ -1,11 +1,20 @@
-use anyhow::{anyhow, Result};
-use axum::{routing::post, Json, Router, extract::State};
+use anyhow::Result;
+use axum::{
+    extract::State,
+    response::sse::{Event, Sse},
+    routing::post,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
-use rig::tool::{Tool, ToolError};
-use rig::completion::{Prompt, ToolDefinition};
-use rig::providers::gemini;
-use rig::client::{ProviderClient, CompletionClient};
-use search::{SearchService, HybridRetriever, CohereReranker};
+use rig::{
+    agent::MultiTurnStreamItem,
+    client::{CompletionClient, ProviderClient},
+    completion::ToolDefinition,
+    providers::gemini,
+    streaming::{StreamedAssistantContent, StreamingPrompt},
+    tool::{Tool, ToolError},
+};
+use search::{CohereReranker, HybridRetriever, SearchService};
 use embeddings::providers::NvidiaProvider;
 use embeddings::sparse::LocalHashingSparseEncoder;
 use connectors::QdrantClient;
@@ -14,11 +23,14 @@ use common::types::TenantId;
 use std::sync::Arc;
 use dotenvy::dotenv;
 use schemars::JsonSchema;
+use futures_util::{Stream, StreamExt};
+use std::convert::Infallible;
+use async_stream::stream;
 
 #[derive(Clone)]
 struct AppState {
     search_service: Arc<SearchService>,
-    agent: Arc<rig::agent::Agent<gemini::completion::CompletionModel>>,
+    agent: Arc<rig::agent::Agent<gemini::CompletionModel>>,
 }
 
 #[derive(Deserialize)]
@@ -56,7 +68,7 @@ impl Tool for KnowledgeBaseTool {
         }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(&self, args: Self::Args) -> Result<String, ToolError> {
         let tenant_id_str = args.tenant_id.unwrap_or_else(|| "default".to_string());
         let tenant = TenantId(tenant_id_str);
         let limit = args.limit.unwrap_or(5) as usize;
@@ -87,7 +99,6 @@ async fn main() -> anyhow::Result<()> {
     let reranker = Arc::new(CohereReranker::new(config.cohere_api_key.unwrap_or_default()));
     let search_service = Arc::new(SearchService::new(retriever, reranker));
 
-    // Fix: Unwrapped client initialization
     let gemini_client = gemini::Client::from_env().expect("Failed to initialize Gemini client");
     
     let kb_tool = KnowledgeBaseTool { search_service: search_service.clone() };
@@ -95,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let agent = Arc::new(
         gemini_client
             .agent("gemma-4-31b-it")
-            .preamble("You are a helpful knowledge base agent. Always use search_knowledge_base tool.")
+            .preamble("You are a professional, expert research assistant. Your responses must be structured, professional, and visually clean using Markdown. Always use clear headers (#), bullet points, and bold text to improve readability. For every piece of information used, YOU MUST CITE THE SOURCE using [Document Title] or [Chunk ID]. Your primary goal is to answer questions using ONLY the information provided in the knowledge base. If the information is not found in the knowledge base, state 'I cannot answer this based on the available information'.")
             .tool(kb_tool)
             .build(),
     );
@@ -116,7 +127,20 @@ async fn main() -> anyhow::Result<()> {
 async fn ask_handler(
     State(state): State<AppState>,
     Json(payload): Json<AskRequest>,
-) -> Json<AskResponse> {
-    let response = state.agent.prompt(&payload.query).await.unwrap_or_else(|_| "Agent error".into());
-    Json(AskResponse { answer: response.to_string() })
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let agent = state.agent.clone();
+    let mut agent_stream = agent.stream_prompt(&payload.query).await;
+
+    let sse_stream = stream! {
+        while let Some(chunk) = agent_stream.next().await {
+            match chunk {
+                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                    yield Ok(Event::default().data(text.text));
+                }
+                _ => {}
+            }
+        }
+    };
+
+    Sse::new(sse_stream)
 }

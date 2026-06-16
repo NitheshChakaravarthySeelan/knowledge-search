@@ -49,7 +49,12 @@ const app = new Elysia()
       const {
         query,
         limit = 5,
-        tenant_id = 'default'
+        tenant_id = 'default',
+        rrf_k,
+        dense_weight,
+        sparse_weight,
+        entity_weight,
+        graph_weight,
       } = body;
 
       console.log(
@@ -58,12 +63,16 @@ const app = new Elysia()
 
       const startTime = Date.now();
 
+      // Build search URL with optional config params
+      let searchUrl = `http://localhost:8081/search?query=${encodeURIComponent(query)}&limit=${limit}&tenant_id=${tenant_id}`;
+      if (rrf_k !== undefined) searchUrl += `&rrf_k=${rrf_k}`;
+      if (dense_weight !== undefined) searchUrl += `&dense_weight=${dense_weight}`;
+      if (sparse_weight !== undefined) searchUrl += `&sparse_weight=${sparse_weight}`;
+      if (entity_weight !== undefined) searchUrl += `&entity_weight=${entity_weight}`;
+      if (graph_weight !== undefined) searchUrl += `&graph_weight=${graph_weight}`;
+
       try {
-        const response = await fetch(
-          `http://localhost:8081/search?query=${encodeURIComponent(
-            query
-          )}&limit=${limit}&tenant_id=${tenant_id}`
-        );
+        const response = await fetch(searchUrl);
 
         if (!response.ok) {
           throw new Error(
@@ -93,23 +102,58 @@ const app = new Elysia()
       body: t.Object({
         query: t.String(),
         limit: t.Optional(t.Numeric()),
-        tenant_id: t.Optional(t.String())
+        tenant_id: t.Optional(t.String()),
+        rrf_k: t.Optional(t.Numeric()),
+        dense_weight: t.Optional(t.Numeric()),
+        sparse_weight: t.Optional(t.Numeric()),
+        entity_weight: t.Optional(t.Numeric()),
+        graph_weight: t.Optional(t.Numeric()),
       })
     }
   )
 
+  // List Sessions
+  .get('/api/sessions', async () => {
+    try {
+      const response = await fetch('http://localhost:8001/sessions');
+      return await response.json();
+    } catch {
+      return [];
+    }
+  })
+
+  // Get Session Messages
+  .get('/api/sessions/:id/messages', async ({ params }) => {
+    try {
+      const response = await fetch(`http://localhost:8001/sessions/${params.id}/messages`);
+      return await response.json();
+    } catch {
+      return [];
+    }
+  })
+
+  // Delete Session
+  .delete('/api/sessions/:id', async ({ params }) => {
+    try {
+      const response = await fetch(`http://localhost:8001/sessions/${params.id}`, { method: 'DELETE' });
+      return await response.json();
+    } catch {
+      return { success: false, error: 'Failed to delete session' };
+    }
+  })
+
   // Generative RAG — streaming
   .post(
     '/api/ask',
-    async ({ body, set }) => {
-      const { question } = body;
+    async ({ body }) => {
+      const { question, tenant_id, session_id } = body;
       console.log(`[RAG TRIGGER] Forwarding to Agent Service: "${question}"`);
 
       try {
         const response = await fetch('http://localhost:8001/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: question })
+          body: JSON.stringify({ query: question, session_id })
         });
 
         if (!response.ok) {
@@ -176,7 +220,8 @@ const app = new Elysia()
     {
       body: t.Object({
         question: t.String(),
-        tenant_id: t.Optional(t.String())
+        tenant_id: t.Optional(t.String()),
+        session_id: t.Optional(t.String())
       })
     }
   )

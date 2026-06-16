@@ -1,143 +1,141 @@
-# Knowledge-OS | High-Performance AI Knowledge Infrastructure Monorepo
+# KnowledgeSearch
 
-Knowledge-OS is an enterprise-grade, high-performance AI knowledge indexing and hybrid search platform designed around **bounded contexts** and **microservices**. Built with **Rust** for heavy compute, extraction, chunking, and search ranking, and **TypeScript + Bun** for the web frontend and API gateway orchestration, it mirrors the resilient architectures of search databases like Qdrant and Quickwit.
-
----
-
-## 🏛 Architecture Overview
+A production-grade hybrid RAG engine with entity-boosted retrieval, session memory, MCP server, and self-improving knowledge graphs — built in Rust + TypeScript.
 
 ```text
-                                 ┌────────────────────────┐
-                                 │      Web Browser       │
-                                 │    (Next.js Client)    │
-                                 └───────────┬────────────┘
-                                             │ HTTP
-                                             ▼
-                                 ┌────────────────────────┐
-                                 │    Bun API Gateway     │
-                                 │     (apps/api)         │
-                                 └───────────┬────────────┘
-                                             │
-                       ┌─────────────────────┴─────────────────────┐
-                       ▼ Job Dispatch (DB / Queue)                 ▼ HTTP/gRPC Queries
-             ┌───────────────────┐                       ┌───────────────────┐
-             │    Sync Worker    │                       │   Search Worker   │
-             │   (sync-worker)   │                       │  (search-worker)  │
-             └─────────┬─────────┘                       └─────────┬─────────┘
-                       │ Notion Pages                              │ Embed & Query
-                       ▼                                           ▼
-             ┌───────────────────┐                       ┌───────────────────┐
-             │ Ingestion Worker  │                       │ Vector Database   │
-             │(ingestion-worker) │                       │     (Qdrant)      │
-             └───────────────────┘                       └───────────────────┘
+     User (Web / MCP / API)
+           |
+           v
+    API Gateway (Bun/Elysia)
+           |
+     +-----+-----+
+     |           |
+  search       ask
+     |           |
+     v           v
+ search-worker  agent-core
+     |           |
+     v           v
+    Qdrant <---> LLM (Gemini/OpenAI/NVIDIA)
+     |
+     v
+ ingestion-worker (parsers → chunkers → entity extract → embed → upsert)
+     |
+     v
+ PostgreSQL (kb_nodes, kb_graph_edges, document_jobs)
 ```
 
-The system separates concerns into:
-1. **API Gateway (`apps/api`)**: Built on Bun and Elysia for blazing-fast TypeScript request routing and session handling.
-2. **Web Frontend (`apps/web`)**: Next.js & React SPA featuring a stunning, responsive **Glassmorphism Obsidian dark-mode custom styling system** written entirely in Vanilla CSS.
-3. **Core Libraries (`crates/`)**: Modular, domain-focused Rust packages handling data modeling, telemetry, documents processing, vector embedding, and hybrid search.
-4. **Daemons / Workers (`services/`)**: High-performance Rust binary services executing background crawler synchronization (`sync-worker`) and the document indexing pipeline (`ingestion-worker`).
+## Features
 
----
+### Search
+- **Hybrid dense + sparse + entity-boosted retrieval** — three independent passes fused via weighted Reciprocal Rank Fusion (RRF)
+- **Entity extraction at search time** — regex-based heuristics extract capitalized phrases, CamelCase terms, acronyms, and quoted terms from queries for an additional entity-aware search pass
+- **Cross-encoder reranking** — Cohere rerank (with fallback to local bigram Jaccard similarity when no API key is set)
+- **Configurable weights** — `dense_weight`, `sparse_weight`, `entity_weight` per query
 
-## 📂 Directory Layout
+### Ingestion
+- **Multi-format parsing** — PDF (via Docling), DOCX, Markdown, plain text
+- **AST-level graph extraction** — parses Rust, Python, JS/TS files to extract classes, functions, imports, and relationships (IMPORTS, DEFINES, REFERENCES, CALLS, IMPLEMENTS)
+- **Entity annotation** — every chunk is annotated with extracted entities, entity names, and a RFC3339 `ingested_at` timestamp
+- **Hierarchical chunking** — parent (1500 char) / child (300 char) chunks with parent-context expansion during search
+- **Self-healing graph** — when an edge references a not-yet-ingested node, a `Placeholder` node is created so all back-links survive
+- **SHA-256 change detection** — skips re-indexing when content hasn't changed
 
-```text
-knowledge-os/
-├── apps/                        # Entrypoints
-│   ├── api/                     # TS API Gateway (Bun & Elysia) - [Day 1 Core]
-│   ├── web/                     # TS Next.js UI Dashboard - [Day 1 Core]
-│   ├── admin/                   # TS Admin dashboard (Future Growth)
-│   └── cli/                     # Rust CLI tools (Future Growth)
-├── crates/                      # Core Business Logic (Rust Workspace Libraries)
-│   ├── common/                  # Configuration, logging, unified errors - [Day 1 Core]
-│   ├── documents/               # Loaders, chunkers, parsers - [Day 1 Core]
-│   ├── embeddings/              # Vector providers (Gemini, OpenAI) - [Day 1 Core]
-│   ├── search/                  # Hybrid retrievers & rerankers - [Day 1 Core]
-│   ├── llm/                     # LLM clients & prompt templaters - [Day 1 Core]
-│   ├── connectors/              # Integrations (Notion crawler) - [Day 1 Core]
-│   └── (auth, ingestion, entities, permissions, analytics, events) # (Future growth)
-├── services/                    # Long-Running Workers (Rust Binaries)
-│   ├── ingestion-worker/        # Document processor queue consumer - [Day 1 Core]
-│   ├── sync-worker/             # Connection poller cron service - [Day 1 Core]
-│   └── (embedding-worker, search-worker, analytics-worker, scheduler) # (Future growth)
-├── deploy/                      # Infrastructure & monitoring configurations (Docker, Kubernetes)
-├── scripts/                     # Operations and data seeding commands
-├── tests/                       # Global monorepo integration suites
-└── Cargo.toml                   # Root Cargo workspace manifest
-```
+### Memory
+- **Per-session conversation memory** — in-memory `HashMap<session_id, VecDeque<(Q, A)>>` storing last 10 turns
+- **History injection** — past Q&A pairs are injected as conversation preamble before each query
+- **SSE streaming ask endpoint** — real-time token-by-token responses with reasoning traces
 
----
+### MCP Server (Model Context Protocol)
+- **`search_knowledge_base`** tool — hybrid search over your knowledge base
+- **`ingest_pdf`** tool — ingest a PDF and return its markdown representation
+- Stdio transport via `rmcp` v1.7.0 — works with Claude Code, Cursor, VS Code Copilot, and any MCP-compatible agent
 
-## ⚡️ Zero-Config Sandbox Mode
+### Embedding Providers
+| Provider | Model | Dimensions |
+|----------|-------|-----------|
+| OpenAI | `text-embedding-3-small` | 1536 |
+| Gemini | `text-embedding-004` | 768 |
+| NVIDIA | `nv-embedqa-e5-v5` | 1024 |
 
-To allow instant testing and developer onboarding, all microservices and providers feature a **High-Fidelity Sandbox Fallback Mode**:
-- **Embeddings / LLM**: If OpenAI or Gemini keys are missing, the system generates deterministic character-bi-gram-based semantic hash vectors locally. You can execute full searches and LLM text generation entirely offline without setting up external bills.
-- **Connectors**: If Notion developer tokens are missing, the Notion Client injects pre-seeded realistic company documents (Engineering Roadmaps, Database Strategies) to simulate realistic ingestion crawls.
+All providers have a deterministic sandbox fallback — no API keys needed for development. Dense + sparse embeddings stored in Qdrant with `dense-text` and `sparse-text` named vector fields.
 
----
+### LLM Providers
+| Provider | Model |
+|----------|-------|
+| OpenAI | `gpt-4o-mini` |
+| Gemini | `gemini-1.5-flash` |
+| NVIDIA | `meta/llama-3.3-70b-instruct` |
 
-## 🚀 Getting Started
+### Frontend (Next.js)
+- Obsidian dark-theme glassmorphism UI built with vanilla CSS
+- Real-time streaming Q&A interface with session support
+- Document management, ingestion status, and search explorer
 
-### 1. Requirements
-Ensure you have the following installed on your machine:
-- **Rust** (stable, Cargo 1.75+)
-- **Bun** (for TypeScript execution, or `npm` / `node` as alternative fallback runner)
+### Sandbox Mode
+Everything works offline with zero API keys — embeddings fall back to deterministic hash vectors, LLM returns templated responses, Notion connector returns seeded sample data, reranker falls back to local Jaccard similarity.
 
----
+## Quick Start
 
-### 2. Running the TypeScript API Gateway (Bun)
-Navigate to the gateway folder and start the developer server:
 ```bash
-cd apps/api
-bun install
-bun run dev
-```
-The gateway will bootstrap on `http://localhost:8000`.
+# 1. Start infrastructure
+docker compose up -d
 
----
+# 2. Run migrations
+cargo run -p migration
 
-### 3. Running the Next.js Frontend (Bun)
-In another terminal, start the Next.js web interface:
-```bash
-cd apps/web
-bun install
-bun run dev
-```
-The Obsidian dashboard will open on `http://localhost:3000`.
+# 3. API Gateway
+cd apps/api && bun install && bun run dev
 
----
+# 4. Frontend
+cd apps/web && bun install && bun run dev
 
-### 4. Running the Rust Background Daemons
-From the monorepo root, execute the background daemons in separate terminal tabs:
-
-**A. Ingestion Worker Pipeline:**
-```bash
+# 5. Ingestion worker
 cargo run -p ingestion-worker
+
+# 6. Search worker
+cargo run -p search-worker
+
+# 7. Agent core (RAG streaming)
+cargo run -p agent-core
+
+# 8. MCP server (for agent tools)
+cargo run -p mcp-server
 ```
 
-**B. Notion Connection Sync Crawler:**
-```bash
-cargo run -p sync-worker
+## Architecture
+
+```
+apps/
+  api/          Bun + Elysia API gateway (:8000)
+  web/          Next.js frontend (:3000)
+
+crates/
+  common/       Shared config, errors, telemetry
+  entities/     SeaORM entity models
+  migration/    Database migrations
+  documents/    Loaders, parsers, chunkers, entity/graph extraction
+  embeddings/   Dense + sparse embedding providers
+  search/       Hybrid retriever, RRF fusion, rerankers
+  llm/          LLM providers + RAG service
+  connectors/   Qdrant client, Notion connector
+  mcp-server/   MCP stdio server with search + ingest tools
+  agent-core/   Axum SSE streaming agent with session memory
+
+services/
+  ingestion-worker/  Document ingestion pipeline (poll → parse → chunk → embed → upsert)
+  search-worker/     Search HTTP API (:8081)
+  sync-worker/       Notion sync cron
 ```
 
----
+## Tech Stack
 
-### 5. Running Cargo Tests and Checks
-Verify that the entire monorepo compile-checks cleanly and test suites execute flawlessly:
-```bash
-# Verify compiler builds
-cargo check
+- **Rust** — core libraries, workers, MCP server, agent core
+- **TypeScript / Bun** — API gateway, frontend
+- **Qdrant** — vector database (dense + sparse named vectors)
+- **PostgreSQL 16** — document jobs, knowledge graph (nodes + edges)
+- **Next.js** — web UI with glassmorphism dark theme
 
-# Run unit tests across all libraries
-cargo test
-```
+## License
 
----
-
-## 🛡 System Telemetry
-The Rust services initialize the observability stack using `tracing` + `tracing-subscriber`. Log levels can be adjusted on boot using the standard `RUST_LOG` environment variable:
-```bash
-RUST_LOG=debug cargo run -p ingestion-worker
-```
-This prints precise, structured operational state traces for the extraction, chunking, and embedding stages.
+MIT

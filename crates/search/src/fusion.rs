@@ -4,35 +4,37 @@ use crate::retrievers::SearchResult;
 /// Reciprocal Rank Fusion (RRF) merges ranked result lists from multiple
 /// retrieval algorithms into a single, unified ranking.
 ///
-/// The RRF score for a document `d` across ranking lists `M` is:
-///   RRF(d) = Σ  1 / (k + rank_m(d))
+/// The weighted RRF score for a document `d` across ranking lists `M` is:
+///   RRF(d) = Σ  w_i / (k + rank_i(d))
 ///
 /// where `k` is a smoothing constant (default 60) that prevents
-/// top-ranked items from dominating the fused score.
+/// top-ranked items from dominating the fused score, and `w_i` is the
+/// weight assigned to each retrieval list (e.g., dense vs. sparse).
 pub struct ReciprocalRankFusion {
     k: f32,
+    weights: Vec<f32>,
 }
 
 impl ReciprocalRankFusion {
-    pub fn new(k: f32) -> Self {
-        Self { k }
-    }
-
-    pub fn default() -> Self {
-        Self::new(60.0)
+    /// Creates a weighted RRF with the given smoothing constant `k` and
+    /// per-list `weights` (one weight per ranked list passed to `fuse`).
+    /// Defaults each weight to 1.0 if fewer weights are provided.
+    pub fn new(k: f32, weights: Vec<f32>) -> Self {
+        Self { k, weights }
     }
 
     /// Fuses multiple ranked lists of SearchResults into a single list,
-    /// scored by RRF and sorted descending. Deduplicates by `chunk_id`.
+    /// scored by weighted RRF and sorted descending. Deduplicates by `chunk_id`.
     pub fn fuse(&self, ranked_lists: Vec<Vec<SearchResult>>) -> Vec<SearchResult> {
         // Accumulate RRF scores per chunk_id
         let mut rrf_scores: HashMap<String, f32> = HashMap::new();
         // Keep the best version of each SearchResult (highest original score)
         let mut best_results: HashMap<String, SearchResult> = HashMap::new();
 
-        for list in &ranked_lists {
+        for (list_idx, list) in ranked_lists.iter().enumerate() {
+            let weight = self.weights.get(list_idx).copied().unwrap_or(1.0);
             for (rank, result) in list.iter().enumerate() {
-                let rrf_contribution = 1.0 / (self.k + (rank as f32 + 1.0));
+                let rrf_contribution = weight / (self.k + (rank as f32 + 1.0));
                 *rrf_scores.entry(result.chunk_id.clone()).or_insert(0.0) += rrf_contribution;
 
                 best_results
@@ -79,7 +81,7 @@ mod tests {
 
     #[test]
     fn test_rrf_fusion() {
-        let rrf = ReciprocalRankFusion::new(1.0); // Use small k for testing
+        let rrf = ReciprocalRankFusion::new(1.0, vec![1.0, 1.0]); // Use small k for testing
 
         // List 1: A, B, C
         let list1 = vec![

@@ -1,16 +1,34 @@
-import type { SearchResponse, DocumentItem, DocumentListResponse, IngestionStatus } from './types';
+import type { SearchResponse, SearchConfig, DocumentItem, DocumentListResponse, IngestionStatus, ChatMessage, SessionSummary } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+export async function listSessions(): Promise<SessionSummary[]> {
+  const response = await fetch(`${API_BASE}/api/sessions`);
+  if (!response.ok) throw new Error(`List sessions failed: ${response.status}`);
+  return response.json();
+}
+
+export async function getSessionMessages(id: string): Promise<ChatMessage[]> {
+  const response = await fetch(`${API_BASE}/api/sessions/${id}/messages`);
+  if (!response.ok) throw new Error(`Get messages failed: ${response.status}`);
+  return response.json();
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/sessions/${id}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`Delete session failed: ${response.status}`);
+}
 
 export async function searchDocuments(
   query: string,
   limit = 5,
   tenantId = 'default',
+  config?: SearchConfig,
 ): Promise<SearchResponse> {
   const response = await fetch(`${API_BASE}/api/search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, limit, tenant_id: tenantId }),
+    body: JSON.stringify({ query, limit, tenant_id: tenantId, ...config }),
   });
   if (!response.ok) throw new Error(`Search failed: ${response.status}`);
   return response.json();
@@ -20,17 +38,18 @@ export async function askQuestion(
   question: string,
   tenantId = 'default',
   onChunk: (text: string) => void,
-): Promise<void> {
+  sessionId?: string,
+): Promise<string> {
   const url = `${API_BASE}/api/ask`;
-  console.log('[askQuestion] calling', url);
+
+  const body: Record<string, string> = { question, tenant_id: tenantId };
+  if (sessionId) body.session_id = sessionId;
 
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, tenant_id: tenantId }),
+    body: JSON.stringify(body),
   });
-
-  console.log('[askQuestion] response status', response.status, response.ok);
 
   if (!response.ok) {
     const errText = await response.text().catch(() => 'unknown');
@@ -42,6 +61,7 @@ export async function askQuestion(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let fullAnswer = '';
+  let returnedSessionId = sessionId || '';
 
   while (true) {
     const { done, value } = await reader.read();
@@ -49,6 +69,8 @@ export async function askQuestion(
     fullAnswer += decoder.decode(value, { stream: true });
     onChunk(fullAnswer);
   }
+
+  return returnedSessionId;
 }
 
 export async function ingestDocument(

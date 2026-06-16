@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use common::types::{DocumentId, TenantId};
+use crate::parsers::entity_extractor::ExtractedEntity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChunk {
@@ -12,4 +13,6 @@ pub struct DocumentChunk {
     pub start_offset: usize,
     pub end_offset: usize,
     pub metadata: serde_json::Value,
-} 
+    pub entities: Vec<ExtractedEntity>,
+    pub ingested_at: String,
+}

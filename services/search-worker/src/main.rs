@@ -11,17 +11,22 @@ use tracing::{error, info};
 use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::TenantId;
-use connectors::QdrantClient;
+use connectors::{GraphClient, QdrantClient};
 use embeddings::{EmbeddingProvider, LocalHashingSparseEncoder, NvidiaProvider};
 use llm::{GeminiLlm, LlmProvider, NvidiaLlm, OpenAiLlm, RagService};
-use search::retrievers::{Retriever, SearchResult};
-use search::HybridRetriever;
+use search::retrievers::{Retriever, SearchConfig, SearchResult};
+use search::{GraphRetriever, HybridRetriever};
 
 #[derive(Deserialize)]
 struct SearchParams {
     query: String,
     limit: Option<usize>,
     tenant_id: Option<String>,
+    rrf_k: Option<f32>,
+    dense_weight: Option<f32>,
+    sparse_weight: Option<f32>,
+    entity_weight: Option<f32>,
+    graph_weight: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -65,21 +70,36 @@ async fn main() {
     // 3. Setup Qdrant Client
     let qdrant_client = Arc::new(QdrantClient::new(&config.qdrant_url).expect("Failed to connect to Qdrant"));
 
-    // 4. Setup Retriever
+    // 4. Setup Graph Client (Postgres for knowledge graph traversal)
+    let graph_client = Arc::new(
+        GraphClient::new(&config.database_url).await
+            .expect("Failed to connect to Postgres for graph queries")
+    );
+
+    // 5. Setup Graph Retriever
+    let graph_retriever = Arc::new(GraphRetriever::new(
+        graph_client,
+        qdrant_client.clone(),
+        embedding_provider.clone(),
+        "knowledge_base".to_string(),
+    ));
+
+    // 6. Setup Retriever (hybrid with graph support)
     let sparse_provider = Arc::new(LocalHashingSparseEncoder::default());
-    let retriever = Arc::new(HybridRetriever::new(
+    let retriever = Arc::new(HybridRetriever::with_graph_retriever(
         embedding_provider,
         sparse_provider,
         qdrant_client.clone(),
         "knowledge_base".to_string(),
+        graph_retriever,
     ));
 
-    // 5. Setup RAG Service
+    // 7. Setup RAG Service
     let rag_service = Arc::new(RagService::new(retriever.clone(), llm_provider));
 
     let state = Arc::new(AppState { retriever, rag_service, qdrant_client, collection_name: "knowledge_base".to_string() });
 
-    // 6. Build router
+    // 8. Build router
     let app = Router::new()
         .route("/search", get(search_handler))
         .route("/ask", get(ask_handler))
@@ -97,8 +117,15 @@ async fn search_handler(
 ) -> Json<Vec<SearchResult>> {
     let tenant_id = TenantId(params.tenant_id.unwrap_or_else(|| "tenant_corporate_1".to_string()));
     let limit = params.limit.unwrap_or(10);
+    let config = SearchConfig {
+        rrf_k: params.rrf_k.unwrap_or(60.0),
+        dense_weight: params.dense_weight.unwrap_or(1.0),
+        sparse_weight: params.sparse_weight.unwrap_or(1.0),
+        entity_weight: params.entity_weight.unwrap_or(0.8),
+        graph_weight: params.graph_weight.unwrap_or(0.6),
+    };
 
-    match state.retriever.retrieve(&tenant_id, &params.query, limit).await {
+    match state.retriever.retrieve_with_config(&tenant_id, &params.query, limit, &config).await {
         Ok(results) => Json(results),
         Err(e) => {
             error!("Search failed: {:?}", e);

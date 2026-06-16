@@ -1,3 +1,17 @@
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  preview: string;
+  message_count: number;
+  last_timestamp: string;
+}
+
 export interface SearchResult {
   chunk_id: string;
   document_id: string;
@@ -32,6 +46,19 @@ export interface IngestionStatus {
   percent: number;
   message: string;
   status: string;
+}
+
+export interface SearchConfig {
+  rrf_k?: number;
+  dense_weight?: number;
+  sparse_weight?: number;
+  entity_weight?: number;
+  graph_weight?: number;
+}
+
+export interface AskRequest {
+  question: string;
+  session_id?: string;
 }
 
 export interface SearchResponse {

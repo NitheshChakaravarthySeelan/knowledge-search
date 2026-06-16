@@ -11,7 +11,7 @@ use tracing::{info, debug, warn};
 
 use common::types::TenantId;
 use documents::chunkers::{Chunker, HierarchicalChunker};
-use documents::{GraphExtractor, ExtractedNode};
+use documents::{GraphExtractor, ExtractedNode, EntityExtractor};
 use embeddings::{EmbeddingProvider, SparseEmbeddingProvider, EmbeddingInput};
 use connectors::QdrantClient;
 use entities::{kb_node, kb_graph_edge, document_job};
@@ -89,8 +89,10 @@ impl IngestionPipeline {
         self.embed_and_upsert_chunks(
             tenant_id,
             doc_uuid,
+            file_path,
             title,
             content,
+            file_ext,
             collection_name,
         ).await?;
 
@@ -355,8 +357,10 @@ impl IngestionPipeline {
         &self,
         tenant_id: &TenantId,
         doc_uuid: Uuid,
+        file_path: &str,
         title: &str,
         content: &str,
+        file_ext: Option<&str>,
         collection_name: &str,
     ) -> Result<()> {
         let doc_to_chunk = documents::models::document::Document {
@@ -369,14 +373,24 @@ impl IngestionPipeline {
             version: 1,
         };
 
-        let chunks = self.chunker.chunk(&doc_to_chunk)
+        let mut chunks = self.chunker.chunk(&doc_to_chunk)
             .map_err(|e| anyhow!("Chunking failed: {:?}", e))?;
+
+        // Extract entities from each chunk
+        for chunk in &mut chunks {
+            let (entities, _relations) = EntityExtractor::extract_for_content(
+                file_path,
+                &chunk.content,
+                file_ext,
+            );
+            chunk.entities = entities;
+        }
 
         info!(
             tenant = tenant_id.0,
             title = title,
             count = chunks.len(),
-            "Hierarchical chunks generated."
+            "Hierarchical chunks generated with entity annotations."
         );
 
         // Process chunks in batches of 50
@@ -476,6 +490,12 @@ impl IngestionPipeline {
                     "node_name": child.name,
                     "is_ast_node": true,
                 }),
+                entities: vec![documents::ExtractedEntity {
+                    name: child.name.clone(),
+                    entity_type: child.node_type.clone(),
+                    confidence: 1.0,
+                }],
+                ingested_at: chrono::Utc::now().to_rfc3339(),
             };
 
             ast_chunks.push(chunk);

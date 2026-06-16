@@ -16,10 +16,42 @@ pub struct SearchResult {
     pub metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct SearchConfig {
+    pub rrf_k: f32,
+    pub dense_weight: f32,
+    pub sparse_weight: f32,
+    pub entity_weight: f32,
+    pub graph_weight: f32,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            rrf_k: 60.0,
+            dense_weight: 1.0,
+            sparse_weight: 1.0,
+            entity_weight: 0.8,
+            graph_weight: 0.6,
+        }
+    }
+}
+
 #[async_trait]
 pub trait Retriever: Send + Sync {
     /// Performs a search operation using a natural language query string.
-    async fn retrieve(&self, tenant_id: &TenantId, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    async fn retrieve(&self, tenant_id: &TenantId, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.retrieve_with_config(tenant_id, query, limit, &SearchConfig::default()).await
+    }
+
+    /// Performs a search with adjustable fusion parameters (rrf_k, dense/sparse weights).
+    async fn retrieve_with_config(
+        &self,
+        tenant_id: &TenantId,
+        query: &str,
+        limit: usize,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>>;
 }
 
 pub struct VectorRetriever {
@@ -44,7 +76,7 @@ impl VectorRetriever {
 
 #[async_trait]
 impl Retriever for VectorRetriever {
-    async fn retrieve(&self, tenant_id: &TenantId, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    async fn retrieve_with_config(&self, tenant_id: &TenantId, query: &str, limit: usize, _config: &SearchConfig) -> Result<Vec<SearchResult>> {
         // 1. Generate the query vector
         let input = EmbeddingInput {
             text: query.to_string(),

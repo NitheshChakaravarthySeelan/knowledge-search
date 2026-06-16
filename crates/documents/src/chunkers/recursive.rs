@@ -1,6 +1,7 @@
 use std::io::Error;
 
 use text_splitter::{Characters, ChunkConfig, MarkdownSplitter};
+use chrono::Utc;
 use crate::models::document::Document;
 use crate::models::document_chunk::DocumentChunk;
 use crate::chunkers::Chunker;
@@ -24,6 +25,7 @@ impl RecursiveTextChunker {
 impl Chunker for RecursiveTextChunker {
     fn chunk(&self, document: &Document) -> Result<Vec<DocumentChunk>, Error> {
         let chunks = self.chunker.chunk_indices(&document.content);
+        let now = Utc::now().to_rfc3339();
         let document_chunks: Vec<DocumentChunk> = chunks
             .enumerate()
             .map(|(i, (start_offset, chunk))| {
@@ -38,6 +40,8 @@ impl Chunker for RecursiveTextChunker {
                     start_offset: start_offset,
                     end_offset: end_offset,
                     metadata: document.metadata.clone(),
+                    entities: Vec::new(),
+                    ingested_at: now.clone(),
                 }
             })
             .collect();

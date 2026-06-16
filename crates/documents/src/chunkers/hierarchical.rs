@@ -1,5 +1,6 @@
 use std::io::Error;
 use text_splitter::{Characters, ChunkConfig, MarkdownSplitter};
+use chrono::Utc;
 
 use crate::models::document::Document;
 use crate::models::document_chunk::DocumentChunk;
@@ -31,6 +32,7 @@ impl Chunker for HierarchicalChunker {
         let parent_chunks = self.parent_splitter.chunk_indices(&document.content);
         let mut document_chunks = Vec::new();
         let mut global_index = 0;
+        let now = Utc::now().to_rfc3339();
 
         for (parent_start_offset, parent_text) in parent_chunks {
             let child_chunks = self.child_splitter.chunk_indices(parent_text);
@@ -49,6 +51,8 @@ impl Chunker for HierarchicalChunker {
                     start_offset,
                     end_offset,
                     metadata: document.metadata.clone(),
+                    entities: Vec::new(),
+                    ingested_at: now.clone(),
                 });
                 global_index += 1;
             }
@@ -84,6 +88,7 @@ mod tests {
         for chunk in &chunks {
             assert_eq!(chunk.document_id.0, "doc-123");
             assert_eq!(chunk.tenant_id.0, "tenant-1");
+            assert!(!chunk.ingested_at.is_empty());
             
             // Child content should be part of parent content
             assert!(chunk.parent_content.is_some());
@@ -96,4 +101,3 @@ mod tests {
         }
     }
 }
-

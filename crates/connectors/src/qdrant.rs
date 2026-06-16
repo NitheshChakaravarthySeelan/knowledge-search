@@ -108,6 +108,8 @@ impl QdrantClient {
             .zip(dense_vectors.iter())
             .zip(sparse_vectors.iter())
         {
+            let entity_names: Vec<&str> = chunk.entities.iter().map(|e| e.name.as_str()).collect();
+
             let payload: Payload = serde_json::json!({
                 "document_id": chunk.document_id.0,
                 "tenant_id": chunk.tenant_id.0,
@@ -117,6 +119,9 @@ impl QdrantClient {
                 "start_offset": chunk.start_offset,
                 "end_offset": chunk.end_offset,
                 "metadata": chunk.metadata,
+                "entities": chunk.entities,
+                "entity_names": entity_names,
+                "ingested_at": chunk.ingested_at,
             })
             .try_into()?;
 
@@ -190,6 +195,43 @@ impl QdrantClient {
             )
             .await?;
         Ok(())
+    }
+
+    /// Search dense vector filtered by a set of document IDs.
+    /// Used by GraphRetriever to find chunks belonging to graph-related documents.
+    pub async fn search_by_document_ids(
+        &self,
+        collection_name: &str,
+        query_vector: Vec<f32>,
+        document_ids: &[String],
+        limit: u64,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<ScoredPoint>> {
+        if document_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let doc_ids: Vec<&str> = document_ids.iter().map(|s| s.as_str()).collect();
+        let mut conditions: Vec<Condition> = doc_ids
+            .iter()
+            .map(|id| Condition::matches("document_id", id.to_string()))
+            .collect();
+
+        if let Some(tenant) = tenant_id {
+            conditions.push(Condition::matches("tenant_id", tenant.to_string()));
+        }
+
+        let filter = Filter::must(conditions);
+
+        let mut search_builder = SearchPointsBuilder::new(collection_name.to_string(), query_vector, limit)
+            .with_payload(true)
+            .filter(filter);
+
+        let mut search_points = search_builder.build();
+        search_points.vector_name = Some("dense-text".to_string());
+
+        let response = self.client.search_points(search_points).await?;
+        Ok(response.result)
     }
 
     pub async fn search_sparse(

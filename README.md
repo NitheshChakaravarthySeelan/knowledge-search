@@ -28,12 +28,14 @@ A production-grade hybrid RAG engine with entity-boosted retrieval, session memo
 ## Features
 
 ### Search
+
 - **Hybrid dense + sparse + entity-boosted retrieval** — three independent passes fused via weighted Reciprocal Rank Fusion (RRF)
 - **Entity extraction at search time** — regex-based heuristics extract capitalized phrases, CamelCase terms, acronyms, and quoted terms from queries for an additional entity-aware search pass
 - **Cross-encoder reranking** — Cohere rerank (with fallback to local bigram Jaccard similarity when no API key is set)
 - **Configurable weights** — `dense_weight`, `sparse_weight`, `entity_weight` per query
 
 ### Ingestion
+
 - **Multi-format parsing** — PDF (via Docling), DOCX, Markdown, plain text
 - **AST-level graph extraction** — parses Rust, Python, JS/TS files to extract classes, functions, imports, and relationships (IMPORTS, DEFINES, REFERENCES, CALLS, IMPLEMENTS)
 - **Entity annotation** — every chunk is annotated with extracted entities, entity names, and a RFC3339 `ingested_at` timestamp
@@ -42,16 +44,19 @@ A production-grade hybrid RAG engine with entity-boosted retrieval, session memo
 - **SHA-256 change detection** — skips re-indexing when content hasn't changed
 
 ### Memory
+
 - **Per-session conversation memory** — in-memory `HashMap<session_id, VecDeque<(Q, A)>>` storing last 10 turns
 - **History injection** — past Q&A pairs are injected as conversation preamble before each query
 - **SSE streaming ask endpoint** — real-time token-by-token responses with reasoning traces
 
 ### MCP Server (Model Context Protocol)
+
 - **`search_knowledge_base`** tool — hybrid search over your knowledge base
 - **`ingest_pdf`** tool — ingest a PDF and return its markdown representation
 - Stdio transport via `rmcp` v1.7.0 — works with Claude Code, Cursor, VS Code Copilot, and any MCP-compatible agent
 
 ### Embedding Providers
+
 | Provider | Model | Dimensions |
 |----------|-------|-----------|
 | OpenAI | `text-embedding-3-small` | 1536 |
@@ -61,18 +66,21 @@ A production-grade hybrid RAG engine with entity-boosted retrieval, session memo
 All providers have a deterministic sandbox fallback — no API keys needed for development. Dense + sparse embeddings stored in Qdrant with `dense-text` and `sparse-text` named vector fields.
 
 ### LLM Providers
+
 | Provider | Model |
 |----------|-------|
 | OpenAI | `gpt-4o-mini` |
-| Gemini | `gemini-1.5-flash` |
+| Gemini | `gemma` |
 | NVIDIA | `meta/llama-3.3-70b-instruct` |
 
 ### Frontend (Next.js)
+
 - Obsidian dark-theme glassmorphism UI built with vanilla CSS
 - Real-time streaming Q&A interface with session support
 - Document management, ingestion status, and search explorer
 
 ### Sandbox Mode
+
 Everything works offline with zero API keys — embeddings fall back to deterministic hash vectors, LLM returns templated responses, Notion connector returns seeded sample data, reranker falls back to local Jaccard similarity.
 
 ## Quick Start
@@ -135,6 +143,14 @@ services/
 - **Qdrant** — vector database (dense + sparse named vectors)
 - **PostgreSQL 16** — document jobs, knowledge graph (nodes + edges)
 - **Next.js** — web UI with glassmorphism dark theme
+
+## Detailed Analysis
+
+See **[ARCHITECTURE_DEEP_DIVE.md](ARCHITECTURE_DEEP_DIVE.md)** for:
+- Step-by-step data flow diagrams for ingestion, search, Q&A, and MCP
+- 18 identified issues with severity ratings
+- 28 prioritized improvement recommendations
+- Comprehensive comparison with Pinecone, Glean, Algolia, and Elasticsearch
 
 ## License
 

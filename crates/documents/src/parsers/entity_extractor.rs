@@ -100,9 +100,17 @@ impl EntityExtractor {
         let mut relations: Vec<ExtractedRelation> = Vec::new();
 
         // Heuristic 1: Multi-word capitalized phrases (proper nouns / concepts)
-        let phrase_re = Regex::new(r#"(?:^|[.!?]\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)"#).unwrap();
+        // Matches at any word boundary (not just sentence starts), so terms
+        // inside parentheses are also found. Leading articles are stripped.
+        let phrase_re = Regex::new(r#"\b((?:The |A |An )?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)"#).unwrap();
         for cap in phrase_re.captures_iter(content) {
-            let phrase = cap.get(1).unwrap().as_str().trim().to_string();
+            let mut phrase = cap.get(1).unwrap().as_str().trim().to_string();
+            for prefix in &["The ", "A ", "An "] {
+                if phrase.starts_with(prefix) {
+                    phrase = phrase[prefix.len()..].to_string();
+                    break;
+                }
+            }
             if phrase.len() > 3 {
                 let entry = entities.entry(phrase)
                     .or_insert_with(|| ("concept".to_string(), 0.0));
@@ -128,8 +136,9 @@ impl EntityExtractor {
             entry.1 += 0.2;
         }
 
-        // Heuristic 4: Acronyms (e.g., RAG, LLM, API, RRF, RoPE)
-        let acronym_re = Regex::new(r"\b([A-Z]{2,5})\b").unwrap();
+        // Heuristic 4: Acronyms (e.g., RAG, LLM, API, RRF, RoPE, LLMs)
+        // Optional trailing 's' handles plural forms (LLMs, RAGs, APIs).
+        let acronym_re = Regex::new(r"\b([A-Z]{2,5}s?)\b").unwrap();
         for cap in acronym_re.captures_iter(content) {
             let term = cap.get(1).unwrap().as_str().to_string();
             if term.len() >= 2 {

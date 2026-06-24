@@ -480,12 +480,15 @@ There is no systematic measurement of retrieval quality. No golden dataset, no R
 
 Industry standard: RAGAS, TruLens, or custom evaluation harness with 100-200 question-answer pairs with ground-truth document sources. Track ContextPrecision, ContextRecall, AnswerFaithfulness, AnswerRelevancy.
 
-#### I6. Embedding Provider Agnosticism Causes Dimension Mismatch Risk
-When switching embedding providers, the Qdrant collection's vector dimension is fixed at creation time. The current logic creates the collection with NVIDIA's dimension (1024), but this is hardcoded:
-```rust
-qdrant.ensure_collection("knowledge_base", 1024)?;
-```
-If someone configures only OpenAI (1536d) or Gemini (768d) without NVIDIA available, the mock fallback generates 1024d vectors anyway via `generate_mock_embedding` which always returns 1024 dimensions. However, if an actual provider with different dimensions were used, the collection would need to be recreated. There is no migration path.
+#### I6. Embedding Provider Agnosticism Causes Dimension Mismatch Risk ✅ RESOLVED
+When switching embedding providers, the Qdrant collection's vector dimension was hardcoded to 1024, causing silent mismatches for OpenAI (1536d) or Gemini (768d) users.
+
+**Resolution**: Added `fn dimension(&self) -> usize` to the `EmbeddingProvider` trait (`crates/embeddings/src/traits.rs:22`) with default 1024. Each provider overrides:
+- `OpenAiProvider` → 1536
+- `GeminiProvider` → 768
+- `NvidiaProvider` → 1024 (the default)
+
+The ingestion worker now calls `embedding_provider.dimension()` instead of the constant. The mock fallback (`generate_mock_embedding`) still generates vectors matching the selected provider's dimension, not a hardcoded value.
 
 ### 7.2 Moderate Issues
 
@@ -575,7 +578,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | I8 | Regex graph extraction | **Use tree-sitter for code parsing**: Replace regex-based extraction with `tree-sitter` bindings for proper AST parsing. This handles nested structures, generics, macros, and edge cases correctly. Tree-sitter has Rust bindings and supports 50+ languages. | 3-5 days |
 | I9 | No analytics | **Add query logging and Prometheus metrics**: Log every search query with: query text, latency, result count, fusion weights, reranker scores. Export metrics (request count, p50/p95/p99 latency, error rate) via `metrics` + `metrics-exporter-prometheus`. Create a Grafana dashboard. | 2-3 days |
 | I16 | Orphaned graph data | ✅ **Completed**: Added `GraphClient::delete_document_tree()` which deletes the Document node (FK CASCADE handles children + edges). Wired into search-worker's delete handler. Graph deleted before Qdrant. See `crates/connectors/src/graph.rs:244`. | Done |
-| I6 | Dimension mismatch | **Parameterize embedding dimension**: Read vector dimension from config/env rather than hardcoding 1024. Make it a property of the embedding provider selection. Add a migration command to recreate the collection when dimension changes. | 1 day |
+| I6 | Dimension mismatch | ✅ **Completed**: `dimension()` method on `EmbeddingProvider` trait; per-provider override (OpenAI=1536, Gemini=768, NVIDIA=1024); worker reads `embedding_provider.dimension()`. | Done |
 
 ### P2: Medium Priority
 

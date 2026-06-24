@@ -102,7 +102,8 @@ async fn main() {
     };
 
     let collection_name = "knowledge_base";
-    if let Err(e) = qdrant_client.ensure_collection(collection_name, 1024).await {
+    let vector_dim = embedding_provider.dimension() as u64;
+    if let Err(e) = qdrant_client.ensure_collection(collection_name, vector_dim).await {
         error!("Failed to ensure Qdrant collection: {:?}", e);
     }
 

@@ -71,6 +71,10 @@ impl EmbeddingProvider for OpenAiProvider {
         })
     }
 
+    fn dimension(&self) -> usize {
+        1536
+    }
+
     async fn embed_batch(&self, inputs: &[EmbeddingInput]) -> Result<Vec<Embedding>> {
         let mut results = Vec::new();
         for input in inputs {
@@ -147,6 +151,10 @@ impl EmbeddingProvider for GeminiProvider {
             vector,
             dimensions: 768,
         })
+    }
+
+    fn dimension(&self) -> usize {
+        768
     }
 
     async fn embed_batch(&self, inputs: &[EmbeddingInput]) -> Result<Vec<Embedding>> {

@@ -537,8 +537,15 @@ Ports are hardcoded throughout: gateway expects agent-core at localhost:8001, se
 #### I15. Reranker API Key Handling
 If `COHERE_API_KEY` is set but invalid, the Cohere reranker will fail with an API error before falling back to the local reranker. There is no automatic fallback on API error — only on empty key.
 
-#### I16. No Document-Level Deletion from Graph
-`DELETE /documents/:id` in the search worker deletes from Qdrant but does not remove `kb_nodes` and `kb_graph_edges` from PostgreSQL. This means deleted documents leave orphaned graph data.
+#### I16. No Document-Level Deletion from Graph ✅ RESOLVED
+
+`DELETE /documents/:id` in the search worker deleted from Qdrant but did not remove `kb_nodes` and `kb_graph_edges` from PostgreSQL, leaving orphaned graph data.
+
+**Resolution**: Added `delete_document_tree()` to `GraphClient` (`crates/connectors/src/graph.rs:244`) and wired it into the delete handler (`services/search-worker/src/main.rs:145`):
+
+- **Relies on existing FK CASCADE** — The migration already sets `ON DELETE CASCADE` on `kb_nodes.parent_id` (child AST nodes) and `kb_graph_edges.source_id`/`target_id` (all edges). Deleting a single Document node cascade-removes the entire subtree automatically.
+- **Graph deleted first, then Qdrant** — Because leftover graph nodes (which graph-traversal searches can still find) are worse than leftover Qdrant points (which are unreachable without graph context).
+- **Partial success reporting** — If Qdrant deletion fails but graph deletion succeeds, we report partial success rather than failing entirely. Each operation has independent error handling.
 
 #### I17. MCP Server Duplicates Service Initialization
 The MCP server (`crates/mcp-server/src/main.rs`) independently creates its own `SearchService`, `QdrantClient`, embedding provider, etc. This duplicates the initialization in `search-worker` and `ingestion-worker`. Any configuration change must be updated in 3+ places.
@@ -567,7 +574,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | I7 | Serial job processing | ✅ **Completed**: Replaced sequential processing with `tokio::sync::Semaphore`-bounded concurrent tasks (default 4). Atomic job claiming via raw SQL. Configurable via `MAX_INGESTION_CONCURRENCY` env var. See `services/ingestion-worker/src/main.rs`. | Done |
 | I8 | Regex graph extraction | **Use tree-sitter for code parsing**: Replace regex-based extraction with `tree-sitter` bindings for proper AST parsing. This handles nested structures, generics, macros, and edge cases correctly. Tree-sitter has Rust bindings and supports 50+ languages. | 3-5 days |
 | I9 | No analytics | **Add query logging and Prometheus metrics**: Log every search query with: query text, latency, result count, fusion weights, reranker scores. Export metrics (request count, p50/p95/p99 latency, error rate) via `metrics` + `metrics-exporter-prometheus`. Create a Grafana dashboard. | 2-3 days |
-| I16 | Orphaned graph data | **Cascade document deletion to graph**: When deleting a document, also delete its `kb_nodes` entry (CASCADE will handle edges) and all associated Qdrant points. The search-worker's `DELETE /documents/:id` should call GraphClient to clean up PostgreSQL. | 0.5 day |
+| I16 | Orphaned graph data | ✅ **Completed**: Added `GraphClient::delete_document_tree()` which deletes the Document node (FK CASCADE handles children + edges). Wired into search-worker's delete handler. Graph deleted before Qdrant. See `crates/connectors/src/graph.rs:244`. | Done |
 | I6 | Dimension mismatch | **Parameterize embedding dimension**: Read vector dimension from config/env rather than hardcoding 1024. Make it a property of the embedding provider selection. Add a migration command to recreate the collection when dimension changes. | 1 day |
 
 ### P2: Medium Priority

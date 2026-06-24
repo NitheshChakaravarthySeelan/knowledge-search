@@ -12,6 +12,7 @@ use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::TenantId;
 use connectors::{GraphClient, QdrantClient};
+use uuid::Uuid;
 use embeddings::{EmbeddingProvider, BM25SparseEncoder, NvidiaProvider};
 use llm::{GeminiLlm, LlmProvider, NvidiaLlm, OpenAiLlm, RagService};
 use search::retrievers::{Retriever, SearchConfig, SearchResult};
@@ -39,6 +40,7 @@ struct AppState {
     retriever: Arc<dyn Retriever>,
     rag_service: Arc<RagService>,
     qdrant_client: Arc<QdrantClient>,
+    graph_client: Arc<GraphClient>,
     collection_name: String,
 }
 
@@ -76,9 +78,9 @@ async fn main() {
             .expect("Failed to connect to Postgres for graph queries")
     );
 
-    // 5. Setup Graph Retriever
+    // 5. Setup Graph Retriever (uses a clone; the original goes to AppState for deletion)
     let graph_retriever = Arc::new(GraphRetriever::new(
-        graph_client,
+        graph_client.clone(),
         qdrant_client.clone(),
         embedding_provider.clone(),
         "knowledge_base".to_string(),
@@ -99,7 +101,7 @@ async fn main() {
     // 7. Setup RAG Service
     let rag_service = Arc::new(RagService::new(retriever.clone(), llm_provider));
 
-    let state = Arc::new(AppState { retriever, rag_service, qdrant_client, collection_name: "knowledge_base".to_string() });
+    let state = Arc::new(AppState { retriever, rag_service, qdrant_client, graph_client, collection_name: "knowledge_base".to_string() });
 
     // 8. Build router
     let app = Router::new()
@@ -146,19 +148,61 @@ async fn delete_document_handler(
     State(state): State<Arc<AppState>>,
     Path(document_id): Path<String>,
 ) -> Result<Json<DeleteResponse>, StatusCode> {
-    match state
+    // Parse the document_id as a UUID.
+    // The document_id is the kb_nodes.id for the Document node — the same UUID
+    // stored in Qdrant's `document_id` payload field during ingestion.
+    let doc_uuid = match Uuid::parse_str(&document_id) {
+        Ok(u) => u,
+        Err(e) => {
+            error!(document_id = document_id, error = %e, "Invalid document UUID");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    // ── Step 1: Delete from knowledge graph (PostgreSQL) ────────────────
+    // The FK CASCADE (set up in migration m20260605_000002) automatically
+    // removes all child AST nodes and all graph edges. We do this first
+    // because leftover graph nodes are worse than leftover Qdrant points
+    // (graph nodes can still be found via graph traversal searches).
+    let graph_deleted = match state.graph_client.delete_document_tree(doc_uuid).await {
+        Ok(deleted) => deleted,
+        Err(e) => {
+            error!(document_id = document_id, error = %e, "Failed to delete document from knowledge graph");
+            // Continue with Qdrant deletion anyway — partial cleanup
+            // is better than no cleanup.
+            false
+        }
+    };
+
+    // ── Step 2: Delete vector points from Qdrant ────────────────────────
+    let qdrant_deleted = match state
         .qdrant_client
         .delete_points_by_document_id(&state.collection_name, &document_id)
         .await
     {
-        Ok(_) => Ok(Json(DeleteResponse {
-            success: true,
-            message: format!("Deleted chunks for document {}", document_id),
-        })),
+        Ok(_) => true,
         Err(e) => {
-            error!("Failed to delete document from Qdrant: {:?}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            error!(document_id = document_id, error = %e, "Failed to delete document from Qdrant");
+            false
         }
+    };
+
+    // ── Report ─────────────────────────────────────────────────────────
+    let mut messages = Vec::new();
+    if graph_deleted {
+        messages.push("knowledge graph subtree removed (with cascade)".to_string());
+    }
+    if qdrant_deleted {
+        messages.push("vector points removed from Qdrant".to_string());
+    }
+
+    if graph_deleted || qdrant_deleted {
+        Ok(Json(DeleteResponse {
+            success: true,
+            message: format!("Document {}: {}", document_id, messages.join("; ")),
+        }))
+    } else {
+        Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 async fn ask_handler(

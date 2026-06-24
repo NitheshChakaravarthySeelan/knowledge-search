@@ -237,6 +237,46 @@ impl GraphClient {
         Ok(document_refs)
     }
 
+    /// Deletes a Document node and its entire subtree from the knowledge graph.
+    ///
+    /// This relies on database-level `ON DELETE CASCADE` foreign keys:
+    /// - `kb_nodes.parent_id` → `kb_nodes.id` → child AST nodes (Class, Function, etc.)
+    ///    are cascade-deleted when their parent Document is removed.
+    /// - `kb_graph_edges.source_id` / `target_id` → `kb_nodes.id` → all edges
+    ///    referencing the document or any of its children are cascade-deleted.
+    ///
+    /// Returns `true` if a node was actually deleted, `false` if no matching
+    /// Document node was found (already deleted or wrong id).
+    pub async fn delete_document_tree(&self, document_id: uuid::Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM kb_nodes
+            WHERE id = $1
+              AND node_type = 'Document'
+            "#,
+        )
+        .bind(document_id)
+        .execute(&self.pool)
+        .await?;
+
+        // rows_affected() tells us whether a Document node was actually found and deleted.
+        // If 0, the document either doesn't exist or was already removed.
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            tracing::info!(
+                document_id = document_id.to_string(),
+                "Deleted document subtree from knowledge graph (cascade includes child nodes and edges)."
+            );
+        } else {
+            tracing::warn!(
+                document_id = document_id.to_string(),
+                "No Document node found in knowledge graph for this id (may have been deleted already)."
+            );
+        }
+
+        Ok(deleted)
+    }
+
     /// Look up a single node by UUID.
     pub async fn get_node(&self, node_id: uuid::Uuid) -> Result<Option<KbNodeRef>> {
         let row = sqlx::query_as::<_, (uuid::Uuid, String, Option<String>, Option<String>)>(

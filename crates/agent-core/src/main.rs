@@ -21,7 +21,7 @@ use rig::{
 };
 use search::{CohereReranker, HybridRetriever, SearchService};
 use embeddings::providers::NvidiaProvider;
-use embeddings::sparse::LocalHashingSparseEncoder;
+use embeddings::sparse::BM25SparseEncoder;
 use connectors::QdrantClient;
 use common::config::AppConfig;
 use common::telemetry::init_telemetry;
@@ -139,7 +139,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Configuration loaded");
 
     let embedding_provider = Arc::new(NvidiaProvider::new(config.nvidia_api_key.unwrap_or_default()));
-    let sparse_provider = Arc::new(LocalHashingSparseEncoder::default());
+    let bm25_stats_path = std::env::var("BM25_STATS_PATH")
+        .unwrap_or_else(|_| "./data/bm25_stats.json".to_string());
+    let sparse_provider = Arc::new(BM25SparseEncoder::with_persistence(bm25_stats_path));
     let qdrant_client = Arc::new(QdrantClient::new(&config.qdrant_url)?);
     info!(qdrant_url = config.qdrant_url, "Qdrant client initialized");
 

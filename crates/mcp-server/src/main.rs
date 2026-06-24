@@ -1,7 +1,7 @@
 use anyhow::Result;
 use connectors::QdrantClient;
 use embeddings::providers::NvidiaProvider;
-use embeddings::sparse::LocalHashingSparseEncoder;
+use embeddings::sparse::BM25SparseEncoder;
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router, ServiceExt, transport::stdio};
 use schemars::JsonSchema;
 use search::{HybridRetriever, CohereReranker, SearchService};
@@ -82,7 +82,9 @@ async fn main() -> Result<()> {
     let embedding_provider = Arc::new(NvidiaProvider::new(
         config.nvidia_api_key.unwrap_or_default(),
     ));
-    let sparse_provider = Arc::new(LocalHashingSparseEncoder::default());
+    let bm25_stats_path = std::env::var("BM25_STATS_PATH")
+        .unwrap_or_else(|_| "./data/bm25_stats.json".to_string());
+    let sparse_provider = Arc::new(BM25SparseEncoder::with_persistence(bm25_stats_path));
     let qdrant_client = Arc::new(QdrantClient::new(&config.qdrant_url)?);
 
     let retriever = Arc::new(HybridRetriever::new(

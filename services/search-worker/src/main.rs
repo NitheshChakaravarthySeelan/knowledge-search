@@ -12,7 +12,7 @@ use common::config::AppConfig;
 use common::telemetry::init_telemetry;
 use common::types::TenantId;
 use connectors::{GraphClient, QdrantClient};
-use embeddings::{EmbeddingProvider, LocalHashingSparseEncoder, NvidiaProvider};
+use embeddings::{EmbeddingProvider, BM25SparseEncoder, NvidiaProvider};
 use llm::{GeminiLlm, LlmProvider, NvidiaLlm, OpenAiLlm, RagService};
 use search::retrievers::{Retriever, SearchConfig, SearchResult};
 use search::{GraphRetriever, HybridRetriever};
@@ -85,7 +85,9 @@ async fn main() {
     ));
 
     // 6. Setup Retriever (hybrid with graph support)
-    let sparse_provider = Arc::new(LocalHashingSparseEncoder::default());
+    let bm25_stats_path = std::env::var("BM25_STATS_PATH")
+        .unwrap_or_else(|_| "./data/bm25_stats.json".to_string());
+    let sparse_provider = Arc::new(BM25SparseEncoder::with_persistence(bm25_stats_path));
     let retriever = Arc::new(HybridRetriever::with_graph_retriever(
         embedding_provider,
         sparse_provider,

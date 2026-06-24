@@ -6,4 +6,7 @@ pub mod sparse;
 pub use models::{Embedding, EmbeddingInput};
 pub use traits::EmbeddingProvider;
 pub use providers::{OpenAiProvider, GeminiProvider, NvidiaProvider};
-pub use sparse::{SparseVector, SparseEmbeddingProvider, LocalHashingSparseEncoder};
+pub use sparse::{
+    SparseVector, SparseEmbeddingProvider, LocalHashingSparseEncoder,
+    BM25SparseEncoder, BM25TermStats,
+};

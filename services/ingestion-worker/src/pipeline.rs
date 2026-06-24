@@ -386,6 +386,11 @@ impl IngestionPipeline {
             chunk.entities = entities;
         }
 
+        // Observe each chunk for BM25 IDF statistics (no-op for non-BM25 providers)
+        for chunk in &chunks {
+            self.sparse_provider.observe_document(&chunk.content).await?;
+        }
+
         info!(
             tenant = tenant_id.0,
             title = title,

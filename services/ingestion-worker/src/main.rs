@@ -15,7 +15,7 @@ use sea_orm_migration::MigratorTrait;
 
 use connectors::QdrantClient;
 use documents::ParserRegistry;
-use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, LocalHashingSparseEncoder};
+use embeddings::{EmbeddingProvider, OpenAiProvider, GeminiProvider, NvidiaProvider, BM25SparseEncoder};
 
 #[tokio::main]
 async fn main() {
@@ -67,7 +67,10 @@ async fn main() {
 
     // 5. Initialize pipeline components
     let parser_registry = ParserRegistry::new();
-    let sparse_encoder = Arc::new(LocalHashingSparseEncoder::default());
+    // BM25 with IDF statistics persisted alongside Qdrant data
+    let bm25_stats_path = std::env::var("BM25_STATS_PATH")
+        .unwrap_or_else(|_| "./data/bm25_stats.json".to_string());
+    let sparse_encoder = Arc::new(BM25SparseEncoder::with_persistence(bm25_stats_path));
 
     // 6. Initialize Qdrant Connector
     let qdrant_client = match QdrantClient::new(&config.qdrant_url) {

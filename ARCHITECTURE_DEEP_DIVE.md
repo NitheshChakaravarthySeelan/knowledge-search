@@ -174,8 +174,10 @@ User uploads file via Web UI
 │    c. Embedding generation (batches of 50):                 │
 │       - Dense: via NvidiaProvider/GeminiProvider/           │
 │         OpenAiProvider (configurable priority)              │
-│       - Sparse: via LocalHashingSparseEncoder               │
-│         (tokenize → hash to vocab index → TF norm + log)   │
+│       - Sparse: via BM25SparseEncoder                        │
+│         (tokenize → compute TF → apply IDF stats →           │
+│          BM25 score with k1=1.2, b=0.75, avgdl from corpus) │
+│       - IDF stats observed per-chunk, persisted to JSON      │
 │    d. Qdrant upsert (upsert_chunks_hybrid):                 │
 │       - Named vectors: dense-text (f32[]), sparse-text      │
 │       - Payload: document_id, tenant_id, content,           │
@@ -245,9 +247,10 @@ User types query in Web UI (or API call)
 │  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │ Pass 2: Sparse Search                                │    │
-│  │ - Encode query via LocalHashingSparseEncoder         │    │
-│  │   (lowercase → tokenize → hash → TF normalize)      │    │
+ │  │ Pass 2: Sparse Search (BM25)                         │    │
+ │  │ - Encode query via BM25SparseEncoder                  │    │
+ │  │   (lowercase → tokenize → hash → apply BM25 score    │    │
+ │  │    with k1=1.2, b=0.75, avgdl, and IDF from corpus)  │    │
 │  │ - Search Qdrant sparse-text field with tenant filter │    │
 │  │ - Returns ranked results                             │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -385,7 +388,7 @@ MCP Client (Claude Code, Cursor, VSCode)
 │                                                             │
 │ Initialization:                                             │
 │ - NvidiaProvider (or mock) → dense embeddings              │
-│ - LocalHashingSparseEncoder → sparse vectors                │
+│ - BM25SparseEncoder → sparse vectors (with persisted IDF)   │
 │ - QdrantClient → vector DB connection                       │
 │ - HybridRetriever → 4-pass retrieval                       │
 │ - CohereReranker (or local fallback)                        │
@@ -455,14 +458,19 @@ Industry standard (Unstructured, Azure Document Intelligence, LlamaIndex): run d
 - **Single-node only**: Cannot scale horizontally behind a load balancer without sticky sessions (which MCP's 2026-07-28 spec has explicitly removed).
 - **Memory unbounded**: No eviction policy beyond the per-session 50-message limit. With enough sessions, OOM is possible.
 
-#### I4. Local Sparse Embeddings are Weak
-`LocalHashingSparseEncoder` in `crates/embeddings/src/sparse.rs` is a simple hash-based bag-of-words encoder. It does not implement BM25 (no IDF component, no term frequency saturation, no document length normalization). It does not implement SPLADE (no learned term expansions). This means:
-- Common words are weighted as heavily as rare discriminative terms.
-- No synonym handling — "car" and "automobile" are completely different sparse tokens.
-- No query expansion — the sparse pass cannot match "vehicles" when the query says "cars".
-- The sparse retrieval pass likely underperforms compared to a proper BM25 or SPLADE implementation.
+#### I4. Local Sparse Embeddings are Weak ✅ RESOLVED
 
-Industry standard: BM25 (for exact term matching) + SPLADE (for learned sparse) or at minimum a proper BM25 implementation with IDF statistics.
+`LocalHashingSparseEncoder` was a simple hash-based bag-of-words encoder. It did not implement BM25 (no IDF component, no term frequency saturation, no document length normalization).
+
+**Resolution**: Replaced with `BM25SparseEncoder` (`crates/embeddings/src/sparse.rs:138`) which implements proper BM25 scoring:
+
+- **Robertson-Sparck Jones IDF**: `IDF(t) = ln(1 + (N - n(t) + 0.5) / (n(t) + 0.5))` — penalizes terms that appear in many documents
+- **BM25 scoring**: `Score(t,d) = IDF(t) * TF(t,d) * (k1+1) / (TF(t,d) + k1 * (1 - b + b * |d|/avgdl))` with k1=1.2, b=0.75
+- **Corpus-level statistics**: Tracks document frequency per term, total document count, and average document length
+- **Persistence**: Statistics are saved to a JSON file (`BM25_STATS_PATH`, default `./data/bm25_stats.json`) and loaded on restart
+- **Incremental updates**: IDF statistics are updated during ingestion via `observe_document()` and consulted during `embed_sparse()` for both index and query time
+
+Remaining limitation: uses `DefaultHasher` for vocabulary indexing (same as the original encoder for backward compatibility with existing Qdrant data), which is not stable across Rust versions. A SPLADE integration would add learned term expansions for synonym handling.
 
 #### I5. No Evaluation Framework
 There is no systematic measurement of retrieval quality. No golden dataset, no Recall@k, no MRR, no NDCG. The closest thing to evaluation is the unit tests in the fusion module (`crates/search/src/fusion.rs`). This is a critical gap because:
@@ -538,7 +546,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | # | Issue | Improvement | Effort |
 |---|-------|-------------|--------|
 | I2 | Python subprocess | **Containerize Docling**: Run a lightweight Python microservice (FastAPI) that accepts a file and returns markdown. The Rust parser calls this service via HTTP. This isolates failures, enables scaling, and avoids per-document interpreter startup cost. | 2-3 days |
-| I4 | Sparse embeddings | **Replace LocalHashingSparseEncoder with BM25**: Implement proper BM25 using IDF statistics from the corpus. The simplest approach: compute BM25 scores in Rust natively using a token-frequency map maintained across tenants. For the vector path: pre-compute BM25 scores for each chunk's terms and encode as a sparse vector. Alternatively, adopt Qdrant's built-in full-text filter + dense combination. | 3-5 days |
+| I4 | Sparse embeddings | ✅ **Completed**: Replaced `LocalHashingSparseEncoder` with `BM25SparseEncoder` implementing proper BM25 scoring with Robertson-Sparck Jones IDF, corpus-level term statistics, and JSON persistence. See `crates/embeddings/src/sparse.rs:138`. | Done |
 | I5 | No evaluation | **Build an evaluation harness**: Create a golden dataset of 50-100 query-document pairs with relevance judgments. Implement a benchmarking binary that computes Recall@k, MRR, NDCG@k across different retrieval configurations. Run this in CI to detect regressions. Use this data to tune chunk sizes, RRF weights, and embedding provider selection. | 3-5 days |
 | I1 | Notion no-op | **Complete the Notion connector**: After fetching pages, create `document_jobs` entries in PostgreSQL with `file_extension` set appropriately (e.g., "notion") and the content as the page body. Add a Notion-specific parser if needed. | 1-2 days |
 | I3 | Session storage | **Replace in-memory HashMap with Redis/Valkey**: Use a Redis-backed session store. This persists across restarts, scales horizontally, and allows TTL-based eviction. The `rig` agent framework supports custom memory backends. | 2-3 days |
@@ -600,7 +608,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | Aspect | KnowledgeSearch | Pinecone | Glean | Algolia | Elasticsearch | Industry Best |
 |--------|----------------|---------|-------|---------|---------------|---------------|
 | **Dense search** | Yes (3 providers) | Yes (any model) | Yes (custom fine-tuned) | No (keyword + vector beta) | Yes (dense_vector) | Yes |
-| **Sparse search** | Hash-based (weak) | Integrated sparse-dense index | BM25 (Lucene) | Proprietary ranking | BM25 + ELSER (SPLADE-like) | BM25 + optional SPLADE |
+| **Sparse search** | BM25 with corpus IDF (Robertson-Sparck Jones, k1=1.2, b=0.75, persisted) | Integrated sparse-dense index | BM25 (Lucene) | Proprietary ranking | BM25 + ELSER (SPLADE-like) | BM25 + optional SPLADE |
 | **Entity-aware** | Regex + graph traversal | Metadata filter only | Enterprise Graph (comprehensive) | Facets + filters | Nested fields + term queries | Pre-built knowledge graph (Glean) or entity linking |
 | **Graph traversal** | 2-hop knowledge graph | Not supported | Enterprise Graph (full) | Not supported | Not natively (can be built) | Graph-enhanced retrieval (Glean, LinkedIn) |
 | **Fusion method** | Weighted RRF (4 passes) | Alpha-weighted dot product | Proprietary ensemble | Proprietary | RRF + linear combination | RRF (default) or linear combination |
@@ -623,7 +631,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 
 ### 9.4 Key Takeaways from Industry Comparison
 
-1. **KnowledgeSearch's 4-pass hybrid retrieval (dense + sparse + entity + graph) is unusually comprehensive.** Most production systems use 2 passes (dense + BM25). The entity boost and graph traversal are unique differentiators. However, the weak sparse encoder (hash-based instead of BM25/SPLADE) undermines the sparse pass significantly.
+1. **KnowledgeSearch's 4-pass hybrid retrieval (dense + sparse + entity + graph) is unusually comprehensive.** Most production systems use 2 passes (dense + BM25). The entity boost and graph traversal are unique differentiators. The sparse pass now uses proper BM25 with corpus-level IDF statistics, on par with production BM25 implementations.
 
 2. **The hierarchical chunking strategy is best-in-class.** Industry experts (SuperML, FRENXT, Unstructured) all recommend parent-child chunking. KnowledgeSearch implements this correctly with parent expansion during search. This is the most impactful RAG optimization and it's already done right.
 
@@ -660,6 +668,10 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | Search retriever multiplier | 2× limit | `service.rs` | Retrieve 2× then rerank |
 | Vector dimension | 1024 | `ingestion-worker/main.rs` | From nv-embedqa-e5-v5 |
 | Sparse vocabulary size | 100,000 | `sparse.rs` | Hardcoded |
+| BM25 k1 | 1.2 | `sparse.rs:BM25SparseEncoder` | Term freq saturation |
+| BM25 b | 0.75 | `sparse.rs:BM25SparseEncoder` | Length normalization |
+| BM25 stats path | `./data/bm25_stats.json` | Env: `BM25_STATS_PATH` | Persisted IDF stats |
+| BM25 vocab size | 100,000 | `sparse.rs:BM25SparseEncoder` | Hash bucket count |
 | Reranker Cohere model | `rerank-english-v3.0` | `rerankers.rs` | Hardcoded |
 | Agent LLM | `gemma-4-31b-it` | `agent-core/main.rs` | Gemini model |
 | Graph traversal max hops | 2 | `graph_retriever.rs` | Hardcoded |

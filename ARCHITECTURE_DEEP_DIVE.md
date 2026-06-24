@@ -489,10 +489,19 @@ If someone configures only OpenAI (1536d) or Gemini (768d) without NVIDIA availa
 
 ### 7.2 Moderate Issues
 
-#### I7. No Batching in Ingestion Worker's Main Loop
-The ingestion worker polls one job at a time (`Loop 0..job_ids.len()`), processes it fully, then moves to the next. There is no batch-level parallelism. If 100 documents are uploaded simultaneously, they are processed sequentially. While `process_in_batches` is used within a single document's embedding step, the job-level concurrency is serial.
+#### I7. No Batching in Ingestion Worker's Main Loop ✅ RESOLVED
 
-Industry pattern (Pinecone AWS reference architecture): SQS queue with multiple worker instances consuming in parallel, each processing one message at a time. Horizontal auto-scaling based on queue depth.
+The ingestion worker polled one job at a time, processing each fully before moving to the next. If 100 documents were uploaded simultaneously, they were processed sequentially — one slow PDF would block everything behind it.
+
+**Resolution**: Replaced the sequential `for` loop with bounded concurrent processing (`services/ingestion-worker/src/main.rs`):
+
+- **`tokio::sync::Semaphore`** — Limits concurrent jobs to `MAX_INGESTION_CONCURRENCY` (default 4). Each spawned task acquires a permit before processing; when the limit is reached, new tasks wait automatically, providing built-in backpressure.
+- **`tokio::spawn` per job** — Each job runs as a separate async task, distributed across the thread pool. CPU-heavy PDF parsing and blocking embedding API calls don't block each other.
+- **Atomic job claiming** — Uses raw `UPDATE ... WHERE status = 'pending'` with `rows_affected()` check instead of `ActiveModel::update()`. This guarantees each job is claimed exactly once, preventing duplicate processing when poll cycles overlap or multiple worker instances run concurrently.
+- **Batch boundary** — The loop awaits all spawned tasks before the next poll cycle, preventing unbounded task accumulation.
+- **`MAX_INGESTION_CONCURRENCY` env var** — Configurable without code changes.
+
+Industry pattern alignment (Pinecone AWS reference architecture): SQS queue with multiple workers. Our bounded-semaphore approach is the single-instance equivalent — instead of horizontal scaling, we manage concurrency within one process. Next step would be to use an external queue (Redis/SQS) for true multi-instance horizontal scaling.
 
 #### I8. Graph Extraction Scope is Too Broad
 `GraphExtractor` in `crates/documents/src/parsers/graph_extractor.rs` uses regex-based heuristics for code analysis. For Rust:
@@ -555,7 +564,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 
 | # | Issue | Improvement | Effort |
 |---|-------|-------------|--------|
-| I7 | Serial job processing | **Parallel job processing with bounded concurrency**: Use a `tokio::semaphore` to process multiple ingestion jobs concurrently (e.g., 4-8 at a time). Add a configurable `--max-concurrent-jobs` flag. | 1 day |
+| I7 | Serial job processing | ✅ **Completed**: Replaced sequential processing with `tokio::sync::Semaphore`-bounded concurrent tasks (default 4). Atomic job claiming via raw SQL. Configurable via `MAX_INGESTION_CONCURRENCY` env var. See `services/ingestion-worker/src/main.rs`. | Done |
 | I8 | Regex graph extraction | **Use tree-sitter for code parsing**: Replace regex-based extraction with `tree-sitter` bindings for proper AST parsing. This handles nested structures, generics, macros, and edge cases correctly. Tree-sitter has Rust bindings and supports 50+ languages. | 3-5 days |
 | I9 | No analytics | **Add query logging and Prometheus metrics**: Log every search query with: query text, latency, result count, fusion weights, reranker scores. Export metrics (request count, p50/p95/p99 latency, error rate) via `metrics` + `metrics-exporter-prometheus`. Create a Grafana dashboard. | 2-3 days |
 | I16 | Orphaned graph data | **Cascade document deletion to graph**: When deleting a document, also delete its `kb_nodes` entry (CASCADE will handle edges) and all associated Qdrant points. The search-worker's `DELETE /documents/:id` should call GraphClient to clean up PostgreSQL. | 0.5 day |
@@ -662,7 +671,9 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | Sparse weight | 1.0 | `hybrid.rs` | Configurable via API |
 | Entity weight | 0.8 | `hybrid.rs` | Configurable via API |
 | Graph weight | 0.6 | `hybrid.rs` | Configurable via API |
-| Poll interval | 2s | `ingestion-worker/main.rs` | Hardcoded |
+| Max ingestion concurrency | 4 | Env: `MAX_INGESTION_CONCURRENCY` | Tokio Semaphore |
+| Poll interval (idle) | 2s | `ingestion-worker/main.rs` | Hardcoded |
+| Job claiming | Atomic UPDATE with `WHERE status='pending'` | `ingestion-worker/main.rs` | Raw SQL, checks `rows_affected` |
 | Notion sync interval | 30s | `sync-worker/main.rs` | Hardcoded |
 | Session message limit | 50 | `agent-core/main.rs` | Hardcoded |
 | Search retriever multiplier | 2× limit | `service.rs` | Retrieve 2× then rerank |

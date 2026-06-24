@@ -7,6 +7,7 @@ pub struct AppConfig {
     pub environment: String,
     pub database_url: String,
     pub qdrant_url: String,
+    pub redis_url: String,
     pub notion_api_token: Option<String>,
     pub openai_api_key: Option<String>,
     pub gemini_api_key: Option<String>,
@@ -28,6 +29,9 @@ impl AppConfig {
         let qdrant_url = env::var("QDRANT_URL")
             .unwrap_or_else(|_| "http://localhost:6334".to_string());
 
+        let redis_url = env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+
         let notion_api_token = env::var("NOTION_API_TOKEN").ok();
         let openai_api_key = env::var("OPENAI_API_KEY").ok();
         let gemini_api_key = env::var("GEMINI_API_KEY").ok();
@@ -38,6 +42,7 @@ impl AppConfig {
             environment,
             database_url,
             qdrant_url,
+            redis_url,
             notion_api_token,
             openai_api_key,
             gemini_api_key,

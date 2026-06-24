@@ -452,11 +452,17 @@ MCP Client (Claude Code, Cursor, VSCode)
 
 Industry standard (Unstructured, Azure Document Intelligence, LlamaIndex): run document parsing in a separate container/service with proper lifecycle management, or use a Rust-native PDF parser with adequate quality.
 
-#### I3. In-Memory Session Storage Doesn't Scale
-`agent-core/src/main.rs` stores sessions in `Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>`. This is:
-- **Lost on restart**: No persistence means all sessions disappear when the service restarts.
-- **Single-node only**: Cannot scale horizontally behind a load balancer without sticky sessions (which MCP's 2026-07-28 spec has explicitly removed).
-- **Memory unbounded**: No eviction policy beyond the per-session 50-message limit. With enough sessions, OOM is possible.
+#### I3. In-Memory Session Storage Doesn't Scale ✅ RESOLVED
+`agent-core/src/main.rs` stored sessions in `Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>`.
+
+**Resolution**: Replaced with a `SessionStore` backed by Redis (`crates/agent-core/src/session_store.rs`):
+- **Persistence**: Sessions survive restarts — Redis stores data on disk with AOF/RDB.
+- **Horizontal scaling**: Any number of agent-core instances can share the same Redis, no sticky sessions needed.
+- **TTL-based eviction**: Sessions expire after 24 hours (`SESSION_TTL_SECS = 86400`). Each `push_message` call refreshes the TTL.
+- **O(1) reads/writes**: Session data stored as a single JSON blob under `session:{id}` in Redis. Messages are appended, trimmed to 100 max, and persisted with `SET` + `EXPIRE` in one round trip.
+- **`push_message_and_get_context`**: Atomic read-then-write that fetches existing messages, builds the conversation preamble, then writes the new message — all in one method on `SessionStore`.
+- **`REDIS_URL` env var**: Configures the Redis connection (default `redis://localhost:6379`).
+- **Docker Compose**: Added `redis:7-alpine` service with health check, persistence volume, and port 6379.
 
 #### I4. Local Sparse Embeddings are Weak ✅ RESOLVED
 
@@ -568,7 +574,7 @@ Chunk sizes (1500/300) are hardcoded in `HierarchicalChunker` and `RecursiveText
 | I4 | Sparse embeddings | ✅ **Completed**: Replaced `LocalHashingSparseEncoder` with `BM25SparseEncoder` implementing proper BM25 scoring with Robertson-Sparck Jones IDF, corpus-level term statistics, and JSON persistence. See `crates/embeddings/src/sparse.rs:138`. | Done |
 | I5 | No evaluation | **Build an evaluation harness**: Create a golden dataset of 50-100 query-document pairs with relevance judgments. Implement a benchmarking binary that computes Recall@k, MRR, NDCG@k across different retrieval configurations. Run this in CI to detect regressions. Use this data to tune chunk sizes, RRF weights, and embedding provider selection. | 3-5 days |
 | I1 | Notion no-op | **Complete the Notion connector**: After fetching pages, create `document_jobs` entries in PostgreSQL with `file_extension` set appropriately (e.g., "notion") and the content as the page body. Add a Notion-specific parser if needed. | 1-2 days |
-| I3 | Session storage | **Replace in-memory HashMap with Redis/Valkey**: Use a Redis-backed session store. This persists across restarts, scales horizontally, and allows TTL-based eviction. The `rig` agent framework supports custom memory backends. | 2-3 days |
+| I3 | Session storage | ✅ **Completed**: Redis-backed `SessionStore` (`crates/agent-core/src/session_store.rs`) with TTL-based eviction (24h), single-round-trip append with trim, SCAN-based listing, and Docker Compose service. | Done |
 
 ### P1: High Priority
 

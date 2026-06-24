@@ -1,7 +1,4 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::convert::Infallible;
-use tokio::sync::Mutex;
 
 use anyhow::Result;
 use axum::{
@@ -10,15 +7,17 @@ use axum::{
     routing::{get, delete, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use rig::{
     agent::MultiTurnStreamItem,
     client::{CompletionClient, ProviderClient},
-    completion::{message::ReasoningContent, request::Prompt, ToolDefinition},
+    completion::{message::ReasoningContent, request::Prompt},
     providers::gemini,
     streaming::{StreamedAssistantContent, StreamingPrompt},
     tool::{Tool, ToolError},
 };
+use rig::completion::ToolDefinition;
+use serde::{Deserialize, Serialize};
+use futures_util::StreamExt;
 use search::{CohereReranker, HybridRetriever, SearchService};
 use embeddings::providers::NvidiaProvider;
 use embeddings::sparse::BM25SparseEncoder;
@@ -28,40 +27,12 @@ use common::telemetry::init_telemetry;
 use common::types::TenantId;
 use dotenvy::dotenv;
 use schemars::JsonSchema;
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
 use async_stream::stream;
 use tracing::{info, warn};
 
-const MAX_SESSION_HISTORY: usize = 50;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatMessage {
-    id: String,
-    role: String,
-    content: String,
-    timestamp: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionSummary {
-    id: String,
-    preview: String,
-    message_count: usize,
-    last_timestamp: String,
-}
-
-#[derive(Clone)]
-struct AppState {
-    search_service: Arc<SearchService>,
-    agent: Arc<rig::agent::Agent<gemini::CompletionModel>>,
-    sessions: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
-}
-
-#[derive(Deserialize)]
-struct AskRequest {
-    query: String,
-    session_id: Option<String>,
-}
+mod session_store;
+use session_store::{SessionStore, ChatMessage, SessionSummary};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SearchArgs {
@@ -102,22 +73,17 @@ impl Tool for KnowledgeBaseTool {
     }
 }
 
-fn build_conversation_context(messages: &[ChatMessage]) -> String {
-    let history: Vec<&ChatMessage> = messages.iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .collect();
+#[derive(Clone)]
+struct AppState {
+    search_service: Arc<SearchService>,
+    agent: Arc<rig::agent::Agent<gemini::CompletionModel>>,
+    sessions: SessionStore,
+}
 
-    if history.is_empty() {
-        return String::new();
-    }
-
-    let mut context = String::from("\n\n--- Previous conversation ---\n");
-    for msg in &history {
-        let label = if msg.role == "user" { "User" } else { "Assistant" };
-        context.push_str(&format!("{}: {}\n\n", label, msg.content));
-    }
-    context.push_str("--- End of previous conversation ---\n");
-    context
+#[derive(Deserialize)]
+struct AskRequest {
+    query: String,
+    session_id: Option<String>,
 }
 
 fn now_iso() -> String {
@@ -169,10 +135,13 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Agent built with gemma-4-31b-it");
 
+    let sessions = SessionStore::new(&config.redis_url).await?;
+    info!(redis_url = config.redis_url, "Redis session store initialized");
+
     let state = AppState {
         search_service,
         agent,
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        sessions,
     };
 
     let app = Router::new()
@@ -194,63 +163,46 @@ async fn main() -> anyhow::Result<()> {
 async fn list_sessions(
     State(state): State<AppState>,
 ) -> Json<Vec<SessionSummary>> {
-    let sessions = state.sessions.lock().await;
-    let mut summaries: Vec<SessionSummary> = sessions.iter()
-        .map(|(id, messages)| {
-            let preview = messages.iter()
-                .find(|m| m.role == "user")
-                .map(|m| {
-                    let truncated: String = m.content.chars().take(80).collect();
-                    if m.content.len() > 80 { format!("{}...", truncated) } else { truncated }
-                })
-                .unwrap_or_default();
-
-            let last_ts = messages.last()
-                .map(|m| m.timestamp.clone())
-                .unwrap_or_default();
-
-            SessionSummary {
-                id: id.clone(),
-                preview,
-                message_count: messages.len(),
-                last_timestamp: last_ts,
-            }
-        })
-        .collect();
-
-    summaries.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
-    Json(summaries)
+    match state.sessions.list_sessions().await {
+        Ok(summaries) => Json(summaries),
+        Err(e) => {
+            warn!(error = %e, "Failed to list sessions");
+            Json(vec![])
+        }
+    }
 }
 
 async fn get_session_messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<Vec<ChatMessage>> {
-    let sessions = state.sessions.lock().await;
-    let messages = sessions.get(&id).cloned().unwrap_or_default();
-    Json(messages)
+    match state.sessions.get_messages(&id).await {
+        Ok(messages) => Json(messages),
+        Err(e) => {
+            warn!(error = %e, session = %id, "Failed to get session messages");
+            Json(vec![])
+        }
+    }
 }
 
 async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let mut sessions = state.sessions.lock().await;
-    if sessions.remove(&id).is_some() {
-        Json(serde_json::json!({"success": true}))
-    } else {
-        Json(serde_json::json!({"success": false, "error": "Session not found"}))
+    match state.sessions.delete_session(&id).await {
+        Ok(true) => Json(serde_json::json!({"success": true})),
+        Ok(false) => Json(serde_json::json!({"success": false, "error": "Session not found"})),
+        Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),
     }
 }
 
 async fn ask_handler(
     State(state): State<AppState>,
     Json(payload): Json<AskRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let session_id = payload.session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     info!(query = payload.query, session = session_id, "ask_handler called");
 
-    // Append user message to history
     let user_msg = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: "user".to_string(),
@@ -258,16 +210,12 @@ async fn ask_handler(
         timestamp: now_iso(),
     };
 
-    let (context_preamble, sid) = {
-        let mut sessions = state.sessions.lock().await;
-        let history = sessions.entry(session_id.clone()).or_default();
-        let ctx = build_conversation_context(history);
-        history.push(user_msg);
-        // Trim oldest pairs if over limit
-        while history.len() > MAX_SESSION_HISTORY * 2 {
-            history.remove(0);
+    let context_preamble = match state.sessions.push_message_and_get_context(&session_id, &user_msg).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            warn!(error = %e, "Failed to store user message, continuing without context");
+            String::new()
         }
-        (ctx, session_id.clone())
     };
 
     let full_query = if context_preamble.is_empty() {
@@ -324,14 +272,14 @@ async fn ask_handler(
 
         // Store assistant message
         if !final_answer.is_empty() {
-            let mut sessions = sessions.lock().await;
-            if let Some(history) = sessions.get_mut(&sid) {
-                history.push(ChatMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    role: "assistant".to_string(),
-                    content: final_answer,
-                    timestamp: now_iso(),
-                });
+            let assistant_msg = ChatMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: "assistant".to_string(),
+                content: final_answer,
+                timestamp: now_iso(),
+            };
+            if let Err(e) = sessions.push_message(&session_id, &assistant_msg).await {
+                warn!(error = %e, "Failed to store assistant message");
             }
         }
 
@@ -354,7 +302,6 @@ async fn ask_sync_handler(
     let session_id = payload.session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     info!(query = payload.query, session = session_id, "ask_sync_handler called");
 
-    // Append user message
     let user_msg = ChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: "user".to_string(),
@@ -362,15 +309,12 @@ async fn ask_sync_handler(
         timestamp: now_iso(),
     };
 
-    let context_preamble = {
-        let mut sessions = state.sessions.lock().await;
-        let history = sessions.entry(session_id.clone()).or_default();
-        let ctx = build_conversation_context(history);
-        history.push(user_msg);
-        while history.len() > MAX_SESSION_HISTORY * 2 {
-            history.remove(0);
+    let context_preamble = match state.sessions.push_message_and_get_context(&session_id, &user_msg).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            warn!(error = %e, "Failed to store user message, continuing without context");
+            String::new()
         }
-        ctx
     };
 
     let full_query = if context_preamble.is_empty() {
@@ -385,14 +329,14 @@ async fn ask_sync_handler(
     match response {
         Ok(answer) => {
             info!(answer_len = answer.len(), "sync answer received");
-            let mut sessions = state.sessions.lock().await;
-            if let Some(history) = sessions.get_mut(&session_id) {
-                history.push(ChatMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    role: "assistant".to_string(),
-                    content: answer.clone(),
-                    timestamp: now_iso(),
-                });
+            let assistant_msg = ChatMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: "assistant".to_string(),
+                content: answer.clone(),
+                timestamp: now_iso(),
+            };
+            if let Err(e) = state.sessions.push_message(&session_id, &assistant_msg).await {
+                warn!(error = %e, "Failed to store assistant message");
             }
             Json(SyncAnswer { answer, session_id })
         }

@@ -25,6 +25,7 @@ tracing = "0.1.44"
 
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+redis = { version = "0.28", features = ["tokio-comp", "connection-manager"] }
 
 # Rig Framework
 rig = { version = "0.38.1", features = ["gemini-grpc"] }

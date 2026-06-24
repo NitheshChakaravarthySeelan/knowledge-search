@@ -1,4 +1,19 @@
 services:
+  # Session & Cache Store
+  redis:
+    image: redis:7-alpine
+    container_name: knowledge-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # Vector Database
   qdrant:
     image: qdrant/qdrant:latest
@@ -35,3 +50,4 @@ services:
 volumes:
   qdrant_data:
   postgres_data:
+  redis_data:

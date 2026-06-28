@@ -12,8 +12,6 @@ pub struct Model {
     pub file_path: String,
     pub node_type: String,
     pub title: Option<String>,
-    pub content: String,
-    pub parent_content: Option<String>,
     pub content_hash: String,
     pub metadata: Option<Json>,
     pub created_at: DateTimeWithTimeZone,

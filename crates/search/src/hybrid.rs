@@ -9,6 +9,7 @@ use documents::EntityExtractor;
 use std::sync::Arc;
 
 use crate::graph_retriever::GraphRetriever;
+use crate::query_transform::QueryTransformer;
 use crate::retrievers::{Retriever, SearchConfig, SearchResult};
 use crate::fusion::ReciprocalRankFusion;
 
@@ -106,7 +107,19 @@ impl Retriever for HybridRetriever {
     ) -> Result<Vec<SearchResult>> {
         let prefetch_limit = (limit * 3).max(10) as u64;
 
+        // --- Transform query: expand acronyms, generate variants ---
+        let tq = QueryTransformer::transform(query);
+        let search_query = &tq.primary;
+        tracing::debug!(
+            original = query,
+            transformed = search_query,
+            variants = tq.variants.len(),
+            "Query transformation applied"
+        );
+
         // --- Extract entities once (shared by entity + graph passes) ---
+        // Entity extraction uses the ORIGINAL query (entities are user-facing terms,
+        // not acronym-expanded forms).
         let (entity_names, _) = EntityExtractor::extract_for_content(
             "query",
             query,
@@ -118,10 +131,12 @@ impl Retriever for HybridRetriever {
             .join(" ");
         let has_entities = !entity_names_str.is_empty();
 
-        // --- Launch all 4 searches in parallel ---
+        // --- Launch all 4 main searches in parallel ---
+        // Dense and sparse use the TRANSFORMED query (acronyms expanded).
+        // Entity and graph use the ORIGINAL query (entities from user's words).
         let dense_fut = async {
             let input = EmbeddingInput {
-                text: query.to_string(),
+                text: search_query.to_string(),
                 user_id: None,
             };
             let embedding = self.embedding_provider.embed(&input).await?;
@@ -144,7 +159,7 @@ impl Retriever for HybridRetriever {
         };
 
         let sparse_fut = async {
-            let sparse_embedding = self.sparse_provider.embed_sparse(query).await?;
+            let sparse_embedding = self.sparse_provider.embed_sparse(search_query).await?;
             let results = self
                 .qdrant_client
                 .search_sparse(
@@ -262,11 +277,65 @@ impl Retriever for HybridRetriever {
 
         fused.truncate(limit);
 
+        // --- Variant search: for compound questions, search each sub-query ---
+        // These add precision for multi-part questions like "What is X? How does Y work?"
+        if !tq.variants.is_empty() {
+            for variant in &tq.variants {
+                let input = EmbeddingInput {
+                    text: variant.clone(),
+                    user_id: None,
+                };
+                match self.embedding_provider.embed(&input).await {
+                    Ok(embedding) => {
+                        match self
+                            .qdrant_client
+                            .search(
+                                &self.collection_name,
+                                embedding.vector,
+                                prefetch_limit,
+                                Some(&tenant_id.0),
+                            )
+                            .await
+                        {
+                            Ok(points) => {
+                                let results: Vec<SearchResult> = points
+                                    .into_iter()
+                                    .map(scored_point_to_result)
+                                    .collect();
+                                if !results.is_empty() {
+                                    // Lower weight for variants — they're auxiliary
+                                    let variant_rrf =
+                                        ReciprocalRankFusion::new(config.rrf_k, vec![0.5]);
+                                    fused = variant_rrf.fuse(vec![fused, results]);
+                                    fused.truncate(limit);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    variant = variant,
+                                    error = %e,
+                                    "Variant search failed, skipping"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            variant = variant,
+                            error = %e,
+                            "Variant embedding failed, skipping"
+                        );
+                    }
+                }
+            }
+        }
+
         tracing::info!(
             tenant = tenant_id.0,
             query = query,
+            transformed = search_query,
             final_results = fused.len(),
-            "Hybrid RRF fusion completed (4-pass parallel)"
+            "Hybrid RRF fusion completed (4-pass parallel + variants)"
         );
 
         Ok(fused)
